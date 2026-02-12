@@ -1,0 +1,11 @@
+**/node_modules
+**/dist
+**/target
+**/.git
+**/.idea
+**/.vscode
+backend/data
+*.log
+*.tmp
+*.cache
+*.iml

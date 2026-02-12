@@ -1,0 +1,10 @@
+server:
+  port: 8080
+
+storage:
+  base-dir: data
+
+spring:
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
