@@ -11,10 +11,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "ifc-viewer-component": "github:Korryan/IFCViewerComponent#main", 
+    "camera-controls": "^1.38.2",
+    "ifc-viewer-component": "github:Korryan/IFCViewerComponent#ccf1ffcbb59b877d1a7e68b7a8f2625a941b846d",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
-    "camera-controls": "^1.38.2",
     "three": "^0.135.0",
     "web-ifc": "0.0.39",
     "web-ifc-viewer": "^1.0.218"
