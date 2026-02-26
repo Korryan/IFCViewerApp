@@ -5,6 +5,10 @@ storage:
   base-dir: data
 
 spring:
+  servlet:
+    multipart:
+      max-file-size: 512MB
+      max-request-size: 512MB
   jackson:
     serialization:
       write-dates-as-timestamps: false
