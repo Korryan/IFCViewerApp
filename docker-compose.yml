@@ -1,4 +1,13 @@
 services:
+  ifc-ops:
+    build:
+      context: .
+      dockerfile: ifcOps/Dockerfile
+    environment:
+      - IFC_OPS_DATA_ROOT=/data
+    volumes:
+      - backend-data:/data
+
   backend:
     build:
       context: .
@@ -7,13 +16,16 @@ services:
       - "8081:8080"
     environment:
       - STORAGE_BASE_DIR=/data
+      - IFC_OPEN_SHELL_BASE_URL=http://ifc-ops:8090
     volumes:
       - backend-data:/data
+    depends_on:
+      - ifc-ops
 
   frontend:
     build:
-      context: .
-      dockerfile: ifcViewer/Dockerfile
+      context: ..
+      dockerfile: IFCViewerApp/ifcViewer/Dockerfile
       args:
         VITE_API_BASE: /api/projects/1
     ports:

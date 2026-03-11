@@ -5,6 +5,7 @@ import {
   type HistoryEntry,
   type MetadataEntry
 } from 'ifc-viewer-component'
+import { exportIfcState } from './api/ifcOpenShellApi'
 import './App.css'
 
 type StoredModelInfo = {
@@ -25,6 +26,7 @@ function App() {
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [isSavedModelsMenuOpen, setIsSavedModelsMenuOpen] = useState(false)
+  const [isExportingIfcState, setIsExportingIfcState] = useState(false)
   const requestTokenRef = useRef(0)
   const savedModelsMenuRef = useRef<HTMLDivElement | null>(null)
 
@@ -142,6 +144,35 @@ function App() {
     },
     [fetchJson, loadModelData, projectApiBase]
   )
+
+  const handleExportIfcState = useCallback(async () => {
+    if (!activeModel || !activeModelApiBase) return
+    setErrorMessage(null)
+    setStatusMessage(`Exporting IFC state for ${activeModel.fileName}...`)
+    setIsExportingIfcState(true)
+    try {
+      const result = await exportIfcState(activeModelApiBase)
+      const exportUrl = `${activeModelApiBase}/ifc/exports/${encodeURIComponent(result.exportFileName)}`
+      const link = document.createElement('a')
+      link.href = exportUrl
+      link.download = result.exportFileName
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+
+      const warningSuffix = result.warnings.length > 0 ? ` (${result.warnings.length} warnings)` : ''
+      setStatusMessage(
+        `IfcOpenShell export complete: ${result.exportedMetadata} metadata, ` +
+          `${result.exportedFurniture} furniture, ${result.exportedHistory} history${warningSuffix}.`
+      )
+    } catch (err) {
+      console.error('IfcOpenShell export failed', err)
+      setStatusMessage(null)
+      setErrorMessage('IfcOpenShell export failed. Check backend and ifc-ops logs.')
+    } finally {
+      setIsExportingIfcState(false)
+    }
+  }, [activeModel, activeModelApiBase])
 
   useEffect(() => {
     const token = ++requestTokenRef.current
@@ -298,6 +329,18 @@ function App() {
                 </div>
               )}
             </div>
+          </div>
+          <div className="file-input__actions">
+            <button
+              type="button"
+              className="file-input__button file-input__button--secondary"
+              onClick={() => {
+                void handleExportIfcState()
+              }}
+              disabled={!activeModelApiBase || isExportingIfcState}
+            >
+              {isExportingIfcState ? 'Exporting...' : 'Export IFC (IfcOpenShell)'}
+            </button>
           </div>
           <input
             id="ifc-file"

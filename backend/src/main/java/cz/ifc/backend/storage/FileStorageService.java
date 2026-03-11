@@ -17,6 +17,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -41,7 +42,9 @@ public class FileStorageService {
   private static final String MODELS_DIR = "models";
   private static final String MODEL_FILE = "model.ifc";
   private static final String MODEL_MANIFEST_FILE = "model.json";
+  private static final String MODEL_EXPORTS_DIR = "exports";
   private static final Pattern MODEL_ID_PATTERN = Pattern.compile("^[A-Za-z0-9_-]+$");
+  private static final Pattern MODEL_EXPORT_FILE_PATTERN = Pattern.compile("^[A-Za-z0-9._-]+$");
 
   // Base directory for file-backed storage.
   private final Path baseDir;
@@ -201,6 +204,55 @@ public class FileStorageService {
       throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Model metadata not found");
     }
     return info;
+  }
+
+  public Path createModelExportIfcPath(String projectId, String modelId, String exportKind) {
+    Path modelDir = resolveModelDir(projectId, modelId);
+    if (!Files.isDirectory(modelDir)) {
+      throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Model not found");
+    }
+    String sanitizedKind =
+        (exportKind == null || exportKind.isBlank())
+            ? "ifc-export"
+            : exportKind.replaceAll("[^A-Za-z0-9_-]+", "-").replaceAll("(^-+|-+$)", "");
+    if (sanitizedKind.isBlank()) {
+      sanitizedKind = "ifc-export";
+    }
+    String fileName = sanitizedKind + "-" + Instant.now().toEpochMilli() + ".ifc";
+    Path exportsDir = modelDir.resolve(MODEL_EXPORTS_DIR).normalize();
+    Path exportPath = exportsDir.resolve(fileName).normalize();
+    if (!exportPath.startsWith(exportsDir)) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid export path");
+    }
+    try {
+      Files.createDirectories(exportsDir);
+    } catch (IOException ex) {
+      throw new ResponseStatusException(
+          HttpStatus.INTERNAL_SERVER_ERROR, "Failed to create model export directory", ex);
+    }
+    return exportPath;
+  }
+
+  public Path getModelExportIfcPath(String projectId, String modelId, String exportFileName) {
+    if (exportFileName == null
+        || exportFileName.isBlank()
+        || !MODEL_EXPORT_FILE_PATTERN.matcher(exportFileName).matches()
+        || !exportFileName.toLowerCase(Locale.ROOT).endsWith(".ifc")) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid export fileName");
+    }
+    Path modelDir = resolveModelDir(projectId, modelId);
+    if (!Files.isDirectory(modelDir)) {
+      throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Model not found");
+    }
+    Path exportsDir = modelDir.resolve(MODEL_EXPORTS_DIR).normalize();
+    Path exportPath = exportsDir.resolve(exportFileName).normalize();
+    if (!exportPath.startsWith(exportsDir)) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid export fileName");
+    }
+    if (!Files.isRegularFile(exportPath)) {
+      throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Exported IFC file not found");
+    }
+    return exportPath;
   }
 
   // Generic JSON list reader with locking.

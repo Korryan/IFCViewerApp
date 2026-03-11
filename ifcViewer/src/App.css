@@ -58,6 +58,10 @@
   cursor: pointer;
   border: 1px solid #0f172a;
 }
+.file-input__button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 
 .file-input__button--secondary {
   background: #fff;

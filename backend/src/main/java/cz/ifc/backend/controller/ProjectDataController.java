@@ -1,10 +1,15 @@
 package cz.ifc.backend.controller;
 
+import cz.ifc.backend.ifcopenshell.IfcOpenShellClient;
 import cz.ifc.backend.model.FurnitureItem;
 import cz.ifc.backend.model.HistoryEntry;
 import cz.ifc.backend.model.MetadataEntry;
 import cz.ifc.backend.storage.FileStorageService;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.http.ContentDisposition;
@@ -26,10 +31,15 @@ import org.springframework.web.multipart.MultipartFile;
 @CrossOrigin(origins = "*")
 @RequestMapping(path = "/projects/{projectId}", produces = MediaType.APPLICATION_JSON_VALUE)
 public class ProjectDataController {
+  private static final Logger log = LoggerFactory.getLogger(ProjectDataController.class);
   private final FileStorageService storageService;
+  private final IfcOpenShellClient ifcOpenShellClient;
 
-  public ProjectDataController(FileStorageService storageService) {
+  public ProjectDataController(
+      FileStorageService storageService,
+      IfcOpenShellClient ifcOpenShellClient) {
     this.storageService = storageService;
+    this.ifcOpenShellClient = ifcOpenShellClient;
   }
 
   @GetMapping("/models")
@@ -41,7 +51,24 @@ public class ProjectDataController {
   public FileStorageService.StoredModelInfo uploadModel(
       @PathVariable String projectId,
       @RequestParam("file") MultipartFile file) {
-    return storageService.storeUploadedModel(projectId, file);
+    FileStorageService.StoredModelInfo stored = storageService.storeUploadedModel(projectId, file);
+    // Best-effort auto-import of IFC embedded state (Pset_Baka_*) for better UX.
+    try {
+      Path sourceIfcPath = storageService.getModelIfcPath(projectId, stored.modelId());
+      IfcOpenShellClient.ImportStateResponse imported = ifcOpenShellClient.importState(sourceIfcPath);
+      storageService.writeMetadata(projectId, stored.modelId(), safeList(imported.metadata()));
+      storageService.writeFurniture(projectId, stored.modelId(), safeList(imported.furniture()));
+      storageService.writeHistory(projectId, stored.modelId(), safeList(imported.history()));
+      if (!safeList(imported.warnings()).isEmpty()) {
+        log.info(
+            "IFC state auto-import warnings for model {}: {}",
+            stored.modelId(),
+            imported.warnings());
+      }
+    } catch (Exception ex) { // Best-effort hydration must not block upload.
+      log.warn("IFC state auto-import failed for model {}", stored.modelId(), ex);
+    }
+    return stored;
   }
 
   @GetMapping(path = "/models/{modelId}/ifc", produces = MediaType.APPLICATION_OCTET_STREAM_VALUE)
@@ -54,6 +81,77 @@ public class ProjectDataController {
         .header(
             HttpHeaders.CONTENT_DISPOSITION,
             ContentDisposition.attachment().filename(modelInfo.fileName()).build().toString())
+        .contentType(MediaType.APPLICATION_OCTET_STREAM)
+        .body(resource);
+  }
+
+  @PostMapping("/models/{modelId}/ifc/import-state")
+  public IfcImportStateResponse importIfcState(
+      @PathVariable String projectId,
+      @PathVariable String modelId) {
+    Path sourceIfcPath = storageService.getModelIfcPath(projectId, modelId);
+    IfcOpenShellClient.ImportStateResponse imported = ifcOpenShellClient.importState(sourceIfcPath);
+
+    List<MetadataEntry> metadata =
+        storageService.writeMetadata(projectId, modelId, safeList(imported.metadata()));
+    List<FurnitureItem> furniture =
+        storageService.writeFurniture(projectId, modelId, safeList(imported.furniture()));
+    List<HistoryEntry> history =
+        storageService.writeHistory(projectId, modelId, safeList(imported.history()));
+
+    return new IfcImportStateResponse(
+        modelId,
+        metadata.size(),
+        furniture.size(),
+        history.size(),
+        safeList(imported.warnings()));
+  }
+
+  @PostMapping("/models/{modelId}/ifc/export-state")
+  public IfcExportStateResponse exportIfcState(
+      @PathVariable String projectId,
+      @PathVariable String modelId) {
+    Path sourceIfcPath = storageService.getModelIfcPath(projectId, modelId);
+    Path targetIfcPath = storageService.createModelExportIfcPath(projectId, modelId, "ifc-state");
+
+    List<MetadataEntry> metadata = storageService.readMetadata(projectId, modelId);
+    List<FurnitureItem> furniture = storageService.readFurniture(projectId, modelId);
+    List<HistoryEntry> history = storageService.readHistory(projectId, modelId);
+
+    IfcOpenShellClient.ExportStateResponse exported =
+        ifcOpenShellClient.exportState(sourceIfcPath, targetIfcPath, metadata, furniture, history);
+
+    String exportFileName = targetIfcPath.getFileName().toString();
+    if (exported.targetIfcPath() != null && !exported.targetIfcPath().isBlank()) {
+      Path returnedPath = Path.of(exported.targetIfcPath());
+      if (returnedPath.getFileName() != null) {
+        exportFileName = returnedPath.getFileName().toString();
+      }
+    }
+
+    return new IfcExportStateResponse(
+        modelId,
+        exportFileName,
+        exported.exportedMetadataCount(),
+        exported.exportedFurnitureCount(),
+        exported.exportedHistoryCount(),
+        safeList(exported.warnings()));
+  }
+
+  @GetMapping(path = "/models/{modelId}/ifc/exports/{fileName:.+}", produces = MediaType.APPLICATION_OCTET_STREAM_VALUE)
+  public ResponseEntity<Resource> downloadIfcExport(
+      @PathVariable String projectId,
+      @PathVariable String modelId,
+      @PathVariable String fileName) {
+    Path exportPath = storageService.getModelExportIfcPath(projectId, modelId, fileName);
+    FileStorageService.StoredModelInfo modelInfo = storageService.getModelInfo(projectId, modelId);
+    Resource resource = new FileSystemResource(exportPath);
+    String downloadName = buildExportDownloadName(modelInfo.fileName(), fileName);
+
+    return ResponseEntity.ok()
+        .header(
+            HttpHeaders.CONTENT_DISPOSITION,
+            ContentDisposition.attachment().filename(downloadName).build().toString())
         .contentType(MediaType.APPLICATION_OCTET_STREAM)
         .body(resource);
   }
@@ -144,4 +242,38 @@ public class ProjectDataController {
       @RequestBody(required = false) List<HistoryEntry> items) {
     return storageService.writeHistory(projectId, modelId, items);
   }
+
+  private <T> List<T> safeList(List<T> items) {
+    return items != null ? items : new ArrayList<>();
+  }
+
+  private String buildExportDownloadName(String originalFileName, String fallbackName) {
+    if (originalFileName == null || originalFileName.isBlank()) {
+      return fallbackName;
+    }
+    String base = originalFileName;
+    int dotIndex = base.lastIndexOf('.');
+    if (dotIndex > 0) {
+      base = base.substring(0, dotIndex);
+    }
+    if (base.isBlank()) {
+      return fallbackName;
+    }
+    return base + "-state.ifc";
+  }
+
+  public record IfcImportStateResponse(
+      String modelId,
+      int importedMetadata,
+      int importedFurniture,
+      int importedHistory,
+      List<String> warnings) {}
+
+  public record IfcExportStateResponse(
+      String modelId,
+      String exportFileName,
+      int exportedMetadata,
+      int exportedFurniture,
+      int exportedHistory,
+      List<String> warnings) {}
 }

@@ -12,12 +12,12 @@
   },
   "dependencies": {
     "camera-controls": "^1.38.2",
-    "ifc-viewer-component": "github:Korryan/IFCViewerComponent#ccf1ffcbb59b877d1a7e68b7a8f2625a941b846d",
+    "ifc-viewer-component": "file:../../IFCViewerComponent",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "three": "^0.135.0",
-    "web-ifc": "0.0.39",
-    "web-ifc-viewer": "^1.0.218"
+    "web-ifc": "0.0.36",
+    "web-ifc-three": "0.0.120"
   },
   "devDependencies": {
     "@eslint/js": "^9.36.0",

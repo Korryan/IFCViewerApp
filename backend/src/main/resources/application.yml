@@ -12,3 +12,6 @@ spring:
   jackson:
     serialization:
       write-dates-as-timestamps: false
+
+ifcopenshell:
+  base-url: ${IFC_OPEN_SHELL_BASE_URL:http://localhost:8090}
