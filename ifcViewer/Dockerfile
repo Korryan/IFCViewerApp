@@ -20,8 +20,8 @@ COPY IFCViewerApp/ifcViewer /workspace/IFCViewerApp/ifcViewer
 ARG VITE_API_BASE=/api/projects/1
 ENV VITE_API_BASE=${VITE_API_BASE}
 
-RUN IFC_WASM_DIR="/workspace/IFCViewerApp/ifcViewer/node_modules/web-ifc-three/node_modules/web-ifc" \
-  && if [ ! -f "${IFC_WASM_DIR}/web-ifc.wasm" ]; then IFC_WASM_DIR="/workspace/IFCViewerApp/ifcViewer/node_modules/web-ifc"; fi \
+RUN IFC_WASM_DIR="/workspace/IFCViewerApp/ifcViewer/node_modules/web-ifc" \
+  && if [ ! -f "${IFC_WASM_DIR}/web-ifc.wasm" ]; then IFC_WASM_DIR="/workspace/IFCViewerApp/ifcViewer/node_modules/ifc-viewer-component/node_modules/web-ifc"; fi \
   && mkdir -p /workspace/IFCViewerApp/ifcViewer/public/ifc \
   && cp "${IFC_WASM_DIR}/web-ifc.wasm" /workspace/IFCViewerApp/ifcViewer/public/ifc/web-ifc.wasm \
   && cp "${IFC_WASM_DIR}/web-ifc-mt.wasm" /workspace/IFCViewerApp/ifcViewer/public/ifc/web-ifc-mt.wasm \
@@ -30,6 +30,10 @@ RUN IFC_WASM_DIR="/workspace/IFCViewerApp/ifcViewer/node_modules/web-ifc-three/n
      elif [ -f "${IFC_WASM_DIR}/web-ifc-mt-worker.js" ]; then \
        cp "${IFC_WASM_DIR}/web-ifc-mt-worker.js" /workspace/IFCViewerApp/ifcViewer/public/ifc/web-ifc-mt.worker.js; \
      fi
+
+RUN FRAG_WORKER="/workspace/IFCViewerApp/ifcViewer/node_modules/@thatopen/fragments/dist/Worker/worker.mjs" \
+  && if [ ! -f "${FRAG_WORKER}" ]; then FRAG_WORKER="/workspace/IFCViewerApp/ifcViewer/node_modules/ifc-viewer-component/node_modules/@thatopen/fragments/dist/Worker/worker.mjs"; fi \
+  && cp "${FRAG_WORKER}" /workspace/IFCViewerApp/ifcViewer/public/fragments-worker.mjs
 
 RUN npm run build:docker
 

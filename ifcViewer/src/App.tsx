@@ -180,25 +180,16 @@ function App() {
       setErrorMessage(null)
       setStatusMessage('Loading saved models...')
       try {
-        const models = await refreshSavedModels()
+        await refreshSavedModels()
         if (requestTokenRef.current !== token) return
 
-        const latest = Array.isArray(models) ? models[0] : null
-        if (!latest) {
-          setActiveModel(null)
-          setSelectedFile(null)
-          setMetadata([])
-          setFurniture([])
-          setHistory([])
-          setIsHydrated(false)
-          setStatusMessage(null)
-          return
-        }
-
-        await loadModelData(latest, {
-          localFile: null,
-          status: `Loading saved model ${latest.fileName}...`
-        })
+        setActiveModel(null)
+        setSelectedFile(null)
+        setMetadata([])
+        setFurniture([])
+        setHistory([])
+        setIsHydrated(false)
+        setStatusMessage(null)
       } catch (err) {
         if (requestTokenRef.current !== token) return
         console.error('Failed to load saved models', err)
@@ -217,7 +208,7 @@ function App() {
     return () => {
       requestTokenRef.current += 1
     }
-  }, [loadModelData, refreshSavedModels])
+  }, [refreshSavedModels])
 
   useEffect(() => {
     if (!isSavedModelsMenuOpen) return

@@ -1,6 +1,6 @@
 # IFC Viewer (React + Vite)
 
-This project shows how to preview IFC models in a React (TypeScript) app with [`web-ifc-viewer`](https://github.com/IFCjs/web-ifc-viewer) and Three.js. It was scaffolded with `npm create vite@latest -- --template react-ts`.
+This project previews IFC models in a React (TypeScript) app using `ifc-viewer-component` built on `@thatopen/components` + Three.js.
 
 ## 1. Initialize the project
 
@@ -13,7 +13,7 @@ npm install
 ## 2. Install viewer libraries and static assets
 
 ```bash
-npm install three@0.149 web-ifc web-ifc-viewer
+npm install
 ```
 
 Copy the IFC.js WebAssembly bundle so Vite can serve it:
@@ -39,4 +39,4 @@ Add a sample model to `/public/test.ifc` (this repo uses the provided `bim.ifc`)
 npm run dev
 ```
 
-Open <http://localhost:5173>. Without picking a file the viewer loads `public/test.ifc`. Once a file is chosen you can orbit and zoom the geometry with the mouse (controls are provided by `web-ifc-viewer`, which builds on Three.js).
+Open <http://localhost:5173>. Without picking a file the viewer loads `public/test.ifc`. Once a file is chosen you can orbit and zoom the geometry with the mouse.
