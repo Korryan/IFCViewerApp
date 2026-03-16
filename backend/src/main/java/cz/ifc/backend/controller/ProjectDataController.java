@@ -110,13 +110,23 @@ public class ProjectDataController {
   @PostMapping("/models/{modelId}/ifc/export-state")
   public IfcExportStateResponse exportIfcState(
       @PathVariable String projectId,
-      @PathVariable String modelId) {
+      @PathVariable String modelId,
+      @RequestBody(required = false) IfcExportStateRequest request) {
     Path sourceIfcPath = storageService.getModelIfcPath(projectId, modelId);
     Path targetIfcPath = storageService.createModelExportIfcPath(projectId, modelId, "ifc-state");
 
-    List<MetadataEntry> metadata = storageService.readMetadata(projectId, modelId);
-    List<FurnitureItem> furniture = storageService.readFurniture(projectId, modelId);
-    List<HistoryEntry> history = storageService.readHistory(projectId, modelId);
+    List<MetadataEntry> metadata =
+        request != null && request.metadata() != null
+            ? safeList(request.metadata())
+            : storageService.readMetadata(projectId, modelId);
+    List<FurnitureItem> furniture =
+        request != null && request.furniture() != null
+            ? safeList(request.furniture())
+            : storageService.readFurniture(projectId, modelId);
+    List<HistoryEntry> history =
+        request != null && request.history() != null
+            ? safeList(request.history())
+            : storageService.readHistory(projectId, modelId);
 
     IfcOpenShellClient.ExportStateResponse exported =
         ifcOpenShellClient.exportState(sourceIfcPath, targetIfcPath, metadata, furniture, history);
@@ -268,6 +278,11 @@ public class ProjectDataController {
       int importedFurniture,
       int importedHistory,
       List<String> warnings) {}
+
+  public record IfcExportStateRequest(
+      List<MetadataEntry> metadata,
+      List<FurnitureItem> furniture,
+      List<HistoryEntry> history) {}
 
   public record IfcExportStateResponse(
       String modelId,

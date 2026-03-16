@@ -12,6 +12,8 @@ public class MetadataEntry {
   private Map<String, Object> custom;
   // World-space position of the element (if moved in the viewer).
   private Vector3 position;
+  // Translation delta in world space relative to the original IFC position.
+  private Vector3 moveDelta;
   // Marks an IFC element as removed in the viewer (soft delete).
   private Boolean deleted;
   private Instant updatedAt;
@@ -49,6 +51,14 @@ public class MetadataEntry {
 
   public void setPosition(Vector3 position) {
     this.position = position;
+  }
+
+  public Vector3 getMoveDelta() {
+    return moveDelta;
+  }
+
+  public void setMoveDelta(Vector3 moveDelta) {
+    this.moveDelta = moveDelta;
   }
 
   public Boolean getDeleted() {

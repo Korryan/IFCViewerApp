@@ -151,7 +151,11 @@ function App() {
     setStatusMessage(`Exporting IFC state for ${activeModel.fileName}...`)
     setIsExportingIfcState(true)
     try {
-      const result = await exportIfcState(activeModelApiBase)
+      const result = await exportIfcState(activeModelApiBase, {
+        metadata: metadata ?? [],
+        furniture: furniture ?? [],
+        history: history ?? []
+      })
       const exportUrl = `${activeModelApiBase}/ifc/exports/${encodeURIComponent(result.exportFileName)}`
       const link = document.createElement('a')
       link.href = exportUrl
@@ -172,7 +176,7 @@ function App() {
     } finally {
       setIsExportingIfcState(false)
     }
-  }, [activeModel, activeModelApiBase])
+  }, [activeModel, activeModelApiBase, furniture, history, metadata])
 
   useEffect(() => {
     const token = ++requestTokenRef.current

@@ -1,3 +1,5 @@
+import type { FurnitureItem, HistoryEntry, MetadataEntry } from 'ifc-viewer-component'
+
 export type IfcImportStateResponse = {
   modelId: string
   importedMetadata: number
@@ -13,6 +15,12 @@ export type IfcExportStateResponse = {
   exportedFurniture: number
   exportedHistory: number
   warnings: string[]
+}
+
+export type IfcExportStateRequest = {
+  metadata?: MetadataEntry[]
+  furniture?: FurnitureItem[]
+  history?: HistoryEntry[]
 }
 
 const parseErrorMessage = async (response: Response): Promise<string> => {
@@ -37,8 +45,12 @@ const parseErrorMessage = async (response: Response): Promise<string> => {
   return fallback
 }
 
-const postJson = async <T>(url: string): Promise<T> => {
-  const response = await fetch(url, { method: 'POST' })
+const postJson = async <T>(url: string, payload?: unknown): Promise<T> => {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: payload !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+    body: payload !== undefined ? JSON.stringify(payload) : undefined
+  })
   if (!response.ok) {
     throw new Error(await parseErrorMessage(response))
   }
@@ -49,6 +61,9 @@ export const importIfcState = async (modelApiBase: string): Promise<IfcImportSta
   return postJson<IfcImportStateResponse>(`${modelApiBase}/ifc/import-state`)
 }
 
-export const exportIfcState = async (modelApiBase: string): Promise<IfcExportStateResponse> => {
-  return postJson<IfcExportStateResponse>(`${modelApiBase}/ifc/export-state`)
+export const exportIfcState = async (
+  modelApiBase: string,
+  payload?: IfcExportStateRequest
+): Promise<IfcExportStateResponse> => {
+  return postJson<IfcExportStateResponse>(`${modelApiBase}/ifc/export-state`, payload)
 }

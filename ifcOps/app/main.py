@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import re
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,7 +12,10 @@ from typing import Any
 
 import ifcopenshell
 import ifcopenshell.api
+import ifcopenshell.guid
 import ifcopenshell.util.element
+import ifcopenshell.util.placement
+import ifcopenshell.util.unit
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
@@ -21,6 +26,10 @@ ELEMENT_STATE_PSET = "Pset_Baka_State"
 FURNITURE_STATE_PSET = "Pset_Baka_Furniture"
 HISTORY_STATE_PSET = "Pset_Baka_History"
 STATE_VERSION = "baka-ifc-state-v1"
+PSET_PROP_KEY_PATTERN = re.compile(r"^pset-(\d+)-(\d+)$")
+EDITABLE_DIRECT_ATTRIBUTES = {"Name", "Description", "ObjectType", "Tag", "LongName"}
+ROOM_NUMBER_KEYS = {"roomnumber", "raumnummer", "number"}
+MOVE_DELTA_CUSTOM_KEY = "__bakaMoveDeltaJson"
 
 app = FastAPI(title="ifc-ops", version="0.1.0")
 
@@ -36,6 +45,7 @@ class MetadataEntry(BaseModel):
   type: str | None = None
   custom: dict[str, Any] | None = None
   position: Point3D | None = None
+  moveDelta: Point3D | None = None
   deleted: bool | None = None
   updatedAt: str | None = None
 
@@ -124,6 +134,15 @@ def _resolve_target_path(raw_path: str) -> Path:
   return resolved
 
 
+def _safe_by_id(model: Any, entity_id: Any) -> Any | None:
+  try:
+    if entity_id is None:
+      return None
+    return model.by_id(int(entity_id))
+  except Exception:
+    return None
+
+
 def _try_json_dict(raw: Any, warnings: list[str], field_name: str) -> dict[str, Any] | None:
   if raw is None:
     return None
@@ -201,7 +220,7 @@ def _get_or_create_pset(model: Any, product: Any, pset_name: str) -> Any:
   if isinstance(values, dict):
     pset_id = values.get("id")
     if isinstance(pset_id, int):
-      existing = model.by_id(pset_id)
+      existing = _safe_by_id(model, pset_id)
       if existing is not None:
         return existing
   return ifcopenshell.api.run("pset.add_pset", model, product=product, name=pset_name)
@@ -305,6 +324,519 @@ def _dump_json(value: Any) -> str:
   return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+def _first_owner_history(model: Any) -> Any | None:
+  owners = model.by_type("IfcOwnerHistory")
+  return owners[0] if owners else None
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+  try:
+    parsed = float(value)
+    if math.isfinite(parsed):
+      return parsed
+  except (TypeError, ValueError):
+    pass
+  return default
+
+
+def _meters_per_model_unit(model: Any) -> float:
+  try:
+    scale = float(ifcopenshell.util.unit.calculate_unit_scale(model))
+    if math.isfinite(scale) and scale > 0:
+      return scale
+  except Exception:
+    pass
+  return 1.0
+
+
+def _safe_dim(value: Any, default: float = 1.0) -> float:
+  parsed = abs(_safe_float(value, default))
+  if parsed <= 1e-6:
+    return default
+  return parsed
+
+
+def _build_ref_direction(rotation: Point3D | None) -> tuple[float, float, float]:
+  # Viewer stores rotation as Euler-like xyz values (radians). For now only yaw (z) is
+  # used for furniture orientation in IFC placement; this matches current 2D floor usage.
+  yaw = _safe_float(rotation.z if rotation is not None else 0.0, 0.0)
+  return (math.cos(yaw), math.sin(yaw), 0.0)
+
+
+def _create_absolute_local_placement(
+  model: Any,
+  position: Point3D,
+  axis: Any = None,
+  ref_direction: Any = None,
+) -> Any:
+  location = model.createIfcCartesianPoint(
+    (
+      _safe_float(position.x),
+      _safe_float(position.y),
+      _safe_float(position.z),
+    )
+  )
+  relative = model.createIfcAxis2Placement3D(location, axis, ref_direction)
+  return model.createIfcLocalPlacement(None, relative)
+
+
+def _set_product_absolute_position(model: Any, product: Any, position: Point3D) -> None:
+  current_placement = getattr(product, "ObjectPlacement", None)
+  axis = None
+  ref_direction = None
+  if current_placement is not None and current_placement.is_a("IfcLocalPlacement"):
+    relative = getattr(current_placement, "RelativePlacement", None)
+    if relative is not None and relative.is_a("IfcAxis2Placement3D"):
+      axis = getattr(relative, "Axis", None)
+      ref_direction = getattr(relative, "RefDirection", None)
+  product.ObjectPlacement = _create_absolute_local_placement(model, position, axis, ref_direction)
+
+
+def _product_has_children(product: Any) -> bool:
+  for rel in list(getattr(product, "IsDecomposedBy", []) or []):
+    related = list(getattr(rel, "RelatedObjects", []) or [])
+    if related:
+      return True
+  for rel in list(getattr(product, "IsNestedBy", []) or []):
+    related = list(getattr(rel, "RelatedObjects", []) or [])
+    if related:
+      return True
+  for rel in list(getattr(product, "ContainsElements", []) or []):
+    related = list(getattr(rel, "RelatedElements", []) or [])
+    if related:
+      return True
+  return False
+
+
+def _entity_id(entity: Any) -> int | None:
+  try:
+    return int(entity.id())
+  except Exception:
+    return None
+
+
+def _remove_from_relation_list(model: Any, rel: Any, attr_name: str, product_id: int) -> bool:
+  related = list(getattr(rel, attr_name, []) or [])
+  if not related:
+    return False
+  filtered = [item for item in related if _entity_id(item) != product_id]
+  if len(filtered) == len(related):
+    return False
+  if filtered:
+    setattr(rel, attr_name, filtered)
+  else:
+    model.remove(rel)
+  return True
+
+
+def _unlink_product_from_inverse_relations(model: Any, product: Any) -> None:
+  product_id = _entity_id(product)
+  if product_id is None:
+    return
+
+  inverses = list(model.get_inverse(product) or [])
+  for inverse in inverses:
+    if inverse is None or not hasattr(inverse, "is_a"):
+      continue
+    try:
+      if inverse.is_a("IfcRelContainedInSpatialStructure"):
+        _remove_from_relation_list(model, inverse, "RelatedElements", product_id)
+        continue
+      if hasattr(inverse, "RelatedObjects"):
+        if _remove_from_relation_list(model, inverse, "RelatedObjects", product_id):
+          continue
+      # Direct pair relations must be removed entirely when one side is hidden.
+      if (
+        inverse.is_a("IfcRelConnects")
+        or inverse.is_a("IfcRelVoidsElement")
+        or inverse.is_a("IfcRelFillsElement")
+        or inverse.is_a("IfcRelSpaceBoundary")
+      ):
+        model.remove(inverse)
+    except Exception:
+      continue
+
+
+def _hide_product_geometry(product: Any) -> None:
+  # Keep entity/type/style graph intact, just strip visible geometry.
+  if hasattr(product, "Representation"):
+    product.Representation = None
+
+
+def _delete_ifc_product_if_leaf(model: Any, product: Any, warnings: list[str]) -> bool:
+  if _product_has_children(product):
+    warnings.append(f"Skipping delete for #{product.id()}: element has child elements.")
+    return False
+  try:
+    _unlink_product_from_inverse_relations(model, product)
+    _hide_product_geometry(product)
+    return True
+  except Exception as exc:  # noqa: BLE001
+    warnings.append(f"Failed to delete IFC element #{product.id()}: {exc}")
+    return False
+
+
+def _create_ifc_measure_value(model: Any, raw_value: Any, preferred_ifc_type: str | None = None) -> Any:
+  if preferred_ifc_type:
+    type_name = preferred_ifc_type.strip()
+    try:
+      if type_name in {"IfcBoolean"}:
+        coerced = _coerce_bool(raw_value)
+        if coerced is None:
+          coerced = str(raw_value).strip().lower() in {"1", "true", "yes", "y"}
+        return model.create_entity(type_name, bool(coerced))
+      if type_name in {"IfcInteger", "IfcCountMeasure"}:
+        return model.create_entity(type_name, int(round(_safe_float(raw_value, 0.0))))
+      if type_name in {"IfcReal", "IfcLengthMeasure", "IfcAreaMeasure", "IfcVolumeMeasure"}:
+        return model.create_entity(type_name, _safe_float(raw_value, 0.0))
+      if type_name in {"IfcLabel", "IfcText", "IfcIdentifier"}:
+        return model.create_entity(type_name, "" if raw_value is None else str(raw_value))
+      return model.create_entity(type_name, "" if raw_value is None else str(raw_value))
+    except Exception:
+      # Fallback below.
+      pass
+  return model.create_entity("IfcLabel", "" if raw_value is None else str(raw_value))
+
+
+def _apply_custom_field_to_product(
+  model: Any,
+  product: Any,
+  key: str,
+  value: Any,
+  warnings: list[str],
+) -> bool:
+  if key in EDITABLE_DIRECT_ATTRIBUTES:
+    if not hasattr(product, key):
+      return False
+    try:
+      setattr(product, key, None if value is None or str(value) == "" else str(value))
+      return True
+    except Exception as exc:  # noqa: BLE001
+      warnings.append(f"Failed to set attribute {key} on #{product.id()}: {exc}")
+      return False
+
+  match = PSET_PROP_KEY_PATTERN.match(key)
+  if not match:
+    return False
+
+  prop_id = int(match.group(2))
+  prop = _safe_by_id(model, prop_id)
+  if prop is None or not prop.is_a("IfcPropertySingleValue"):
+    warnings.append(f"Skipping metadata key {key} for #{product.id()}: target property not found.")
+    return False
+
+  preferred_type: str | None = None
+  nominal = getattr(prop, "NominalValue", None)
+  if nominal is not None and hasattr(nominal, "is_a"):
+    preferred_type = nominal.is_a()
+
+  try:
+    prop.NominalValue = _create_ifc_measure_value(model, value, preferred_type)
+    return True
+  except Exception as exc:  # noqa: BLE001
+    warnings.append(f"Failed to update pset value {key} on #{product.id()}: {exc}")
+    return False
+
+
+def _find_representation_context(model: Any) -> Any | None:
+  subcontexts = model.by_type("IfcGeometricRepresentationSubContext")
+  for context in subcontexts:
+    identifier = str(getattr(context, "ContextIdentifier", "") or "").strip().lower()
+    if identifier == "body":
+      return context
+  for context in subcontexts:
+    context_type = str(getattr(context, "ContextType", "") or "").strip().lower()
+    if context_type == "model":
+      return context
+
+  contexts = model.by_type("IfcGeometricRepresentationContext")
+  for context in contexts:
+    context_type = str(getattr(context, "ContextType", "") or "").strip().lower()
+    if context_type == "model":
+      return context
+
+  if subcontexts:
+    return subcontexts[0]
+  if contexts:
+    return contexts[0]
+  return None
+
+
+def _create_box_representation(model: Any, context: Any, item: FurnitureItem) -> Any:
+  scale = item.scale or Point3D(x=1.0, y=1.0, z=1.0)
+  width = _safe_dim(scale.x, 1.0)
+  depth = _safe_dim(scale.y, 1.0)
+  height = _safe_dim(scale.z, 1.0)
+
+  profile_location = model.createIfcCartesianPoint((0.0, 0.0))
+  profile_position = model.createIfcAxis2Placement2D(profile_location, None)
+  profile = model.createIfcRectangleProfileDef("AREA", None, profile_position, width, depth)
+
+  solid_origin = model.createIfcCartesianPoint((-width / 2.0, -depth / 2.0, -height / 2.0))
+  solid_position = model.createIfcAxis2Placement3D(solid_origin, None, None)
+  extrude_direction = model.createIfcDirection((0.0, 0.0, 1.0))
+  solid = model.createIfcExtrudedAreaSolid(profile, solid_position, extrude_direction, height)
+
+  shape = model.createIfcShapeRepresentation(context, "Body", "SweptSolid", [solid])
+  return model.createIfcProductDefinitionShape(None, None, [shape])
+
+
+def _normalize_room_number(value: Any) -> str:
+  return str(value or "").strip().lower()
+
+
+def _space_matches_room_number(space: Any, room_number: str) -> bool:
+  expected = _normalize_room_number(room_number)
+  if not expected:
+    return False
+
+  for attr in ("Name", "LongName", "Tag"):
+    raw = getattr(space, attr, None)
+    if _normalize_room_number(raw) == expected:
+      return True
+
+  psets = ifcopenshell.util.element.get_psets(space)
+  for pset_values in psets.values():
+    if not isinstance(pset_values, dict):
+      continue
+    for key, raw in pset_values.items():
+      if key == "id":
+        continue
+      normalized_key = str(key).strip().lower().replace(" ", "").replace("_", "").replace("-", "")
+      if normalized_key not in ROOM_NUMBER_KEYS:
+        continue
+      if _normalize_room_number(raw) == expected:
+        return True
+  return False
+
+
+def _resolve_furniture_container(model: Any, item: FurnitureItem, warnings: list[str]) -> Any | None:
+  if item.roomNumber:
+    for space in model.by_type("IfcSpace"):
+      if _space_matches_room_number(space, item.roomNumber):
+        return space
+    warnings.append(f'Furniture "{item.id}" room "{item.roomNumber}" not found, using fallback container.')
+
+  for ifc_type in ("IfcBuildingStorey", "IfcBuilding", "IfcSite", "IfcProject"):
+    entities = model.by_type(ifc_type)
+    if entities:
+      return entities[0]
+  return None
+
+
+def _assign_product_to_spatial_structure(model: Any, product: Any, structure: Any) -> None:
+  for rel in list(getattr(product, "ContainedInStructure", []) or []):
+    if not rel.is_a("IfcRelContainedInSpatialStructure"):
+      continue
+    related = [entity for entity in list(getattr(rel, "RelatedElements", []) or []) if entity.id() != product.id()]
+    if related:
+      rel.RelatedElements = related
+    else:
+      model.remove(rel)
+
+  target_rel = None
+  for rel in list(getattr(structure, "ContainsElements", []) or []):
+    if rel.is_a("IfcRelContainedInSpatialStructure"):
+      target_rel = rel
+      break
+
+  if target_rel is not None:
+    related = list(getattr(target_rel, "RelatedElements", []) or [])
+    if all(entity.id() != product.id() for entity in related):
+      related.append(product)
+      target_rel.RelatedElements = related
+    return
+
+  model.create_entity(
+    "IfcRelContainedInSpatialStructure",
+    GlobalId=ifcopenshell.guid.new(),
+    OwnerHistory=_first_owner_history(model),
+    Name=None,
+    Description=None,
+    RelatedElements=[product],
+    RelatingStructure=structure,
+  )
+
+
+def _add_furniture_as_proxy(model: Any, context: Any | None, item: FurnitureItem, warnings: list[str]) -> bool:
+  if context is None:
+    warnings.append(f'Cannot add furniture "{item.id}": no IFC representation context found.')
+    return False
+
+  owner_history = _first_owner_history(model)
+  ref = _build_ref_direction(item.rotation)
+  axis = model.createIfcDirection((0.0, 0.0, 1.0))
+  ref_direction = model.createIfcDirection(ref)
+  placement = _create_absolute_local_placement(model, item.position, axis, ref_direction)
+
+  representation = _create_box_representation(model, context, item)
+  proxy = model.create_entity(
+    "IfcBuildingElementProxy",
+    GlobalId=ifcopenshell.guid.new(),
+    OwnerHistory=owner_history,
+    Name=item.id or "Furniture",
+    Description=None,
+    ObjectType=item.model or "Furniture",
+    ObjectPlacement=placement,
+    Representation=representation,
+    Tag=item.id or None,
+  )
+
+  try:
+    if hasattr(proxy, "PredefinedType"):
+      proxy.PredefinedType = "NOTDEFINED"
+  except Exception:
+    # Best effort; schema differences can reject this assignment.
+    pass
+
+  container = _resolve_furniture_container(model, item, warnings)
+  if container is None:
+    warnings.append(f'Furniture "{item.id}" was created without spatial container.')
+    return True
+
+  try:
+    _assign_product_to_spatial_structure(model, proxy, container)
+  except Exception as exc:  # noqa: BLE001
+    warnings.append(f'Furniture "{item.id}" container assignment failed: {exc}')
+  return True
+
+
+def _apply_metadata_custom_updates(model: Any, product: Any, custom: dict[str, Any], warnings: list[str]) -> int:
+  updates = 0
+  for key, value in custom.items():
+    if key == MOVE_DELTA_CUSTOM_KEY:
+      continue
+    if _apply_custom_field_to_product(model, product, key, value, warnings):
+      updates += 1
+  return updates
+
+
+def _parse_move_delta_from_custom(custom: dict[str, Any] | None) -> tuple[float, float, float] | None:
+  if not custom:
+    return None
+  raw = custom.get(MOVE_DELTA_CUSTOM_KEY)
+  if not isinstance(raw, str) or not raw.strip():
+    return None
+  try:
+    parsed = json.loads(raw)
+  except json.JSONDecodeError:
+    return None
+  if not isinstance(parsed, dict):
+    return None
+  return (
+    _safe_float(parsed.get("dx"), 0.0),
+    _safe_float(parsed.get("dy"), 0.0),
+    _safe_float(parsed.get("dz"), 0.0),
+  )
+
+
+def _parse_move_delta_from_point(point: Point3D | None) -> tuple[float, float, float] | None:
+  if point is None:
+    return None
+  return (
+    _safe_float(point.x, 0.0),
+    _safe_float(point.y, 0.0),
+    _safe_float(point.z, 0.0),
+  )
+
+
+def _parse_point_json(raw: Any) -> Point3D | None:
+  if isinstance(raw, Point3D):
+    return raw
+  if not isinstance(raw, str) or not raw.strip():
+    return None
+  try:
+    parsed = json.loads(raw)
+  except json.JSONDecodeError:
+    return None
+  if not isinstance(parsed, dict):
+    return None
+  try:
+    return Point3D(
+      x=_safe_float(parsed.get("x"), 0.0),
+      y=_safe_float(parsed.get("y"), 0.0),
+      z=_safe_float(parsed.get("z"), 0.0),
+    )
+  except Exception:
+    return None
+
+
+def _read_previous_exported_position(product: Any) -> Point3D | None:
+  pset_values = _read_pset_values(product, ELEMENT_STATE_PSET)
+  if not pset_values:
+    return None
+  return _parse_point_json(pset_values.get("PositionJson"))
+
+
+def _placement_parent_rotation_matrix(placement: Any) -> list[list[float]] | None:
+  parent = getattr(placement, "PlacementRelTo", None)
+  if parent is None:
+    return None
+  try:
+    matrix = ifcopenshell.util.placement.get_local_placement(parent)
+  except Exception:
+    return None
+  if matrix is None:
+    return None
+  try:
+    return [
+      [float(matrix[0][0]), float(matrix[0][1]), float(matrix[0][2])],
+      [float(matrix[1][0]), float(matrix[1][1]), float(matrix[1][2])],
+      [float(matrix[2][0]), float(matrix[2][1]), float(matrix[2][2])],
+    ]
+  except Exception:
+    return None
+
+
+def _world_delta_to_local(placement: Any, dx: float, dy: float, dz: float) -> tuple[float, float, float]:
+  rotation = _placement_parent_rotation_matrix(placement)
+  if rotation is None:
+    return (dx, dy, dz)
+  # local = R^T * world
+  return (
+    rotation[0][0] * dx + rotation[1][0] * dy + rotation[2][0] * dz,
+    rotation[0][1] * dx + rotation[1][1] * dy + rotation[2][1] * dz,
+    rotation[0][2] * dx + rotation[1][2] * dy + rotation[2][2] * dz,
+  )
+
+
+def _translate_product_by_delta(product: Any, dx: float, dy: float, dz: float) -> bool:
+  placement = getattr(product, "ObjectPlacement", None)
+  if placement is None or not placement.is_a("IfcLocalPlacement"):
+    return False
+  relative = getattr(placement, "RelativePlacement", None)
+  if relative is None:
+    return False
+  location = getattr(relative, "Location", None)
+  if location is None:
+    return False
+  coordinates = list(getattr(location, "Coordinates", []) or [])
+  if len(coordinates) < 2:
+    return False
+
+  local_dx, local_dy, local_dz = _world_delta_to_local(placement, dx, dy, dz)
+  coordinates[0] = _safe_float(coordinates[0], 0.0) + local_dx
+  coordinates[1] = _safe_float(coordinates[1], 0.0) + local_dy
+  if relative.is_a("IfcAxis2Placement3D"):
+    if len(coordinates) >= 3:
+      coordinates[2] = _safe_float(coordinates[2], 0.0) + local_dz
+    else:
+      coordinates.append(local_dz)
+  elif relative.is_a("IfcAxis2Placement2D"):
+    # 2D placements ignore Z translation.
+    coordinates = coordinates[:2]
+  else:
+    return False
+  location.Coordinates = tuple(coordinates)
+  return True
+
+
+def _viewer_delta_to_ifc_world(dx: float, dy: float, dz: float) -> tuple[float, float, float]:
+  # Viewer uses Y-up coordinates while IFC world is Z-up in this pipeline.
+  # Keep X, map viewer Y->IFC Z, and invert viewer Z when mapping to IFC Y.
+  return (dx, -dz, dy)
+
+
 def _export_state(request: ExportStateRequest) -> ExportStateResponse:
   source_path = _resolve_existing_path(request.source_ifc_path, "source_ifc_path")
   target_path = _resolve_target_path(request.target_ifc_path)
@@ -320,11 +852,99 @@ def _export_state(request: ExportStateRequest) -> ExportStateResponse:
   except Exception as exc:  # noqa: BLE001
     raise RuntimeError(f"Failed to open copied IFC file: {target_path}") from exc
 
-  exported_metadata = 0
+  # Viewer works in meters; IFC placements use project length units (often millimeters).
+  # Convert viewer deltas to model units before writing ObjectPlacement coordinates.
+  meters_per_unit = _meters_per_model_unit(model)
+  viewer_to_model_units = 1.0 / meters_per_unit if meters_per_unit > 0 else 1.0
+
+  hard_deleted = 0
+  hard_moved = 0
+  hard_metadata_updates = 0
+  hard_added = 0
+
+  # 1) Hard delete only leaf IFC products.
   for entry in request.metadata:
-    product = model.by_id(entry.ifcId)
+    if not entry.deleted:
+      continue
+    product = _safe_by_id(model, entry.ifcId)
+    if product is None:
+      warnings.append(f"Delete references missing ifcId {entry.ifcId}")
+      continue
+    if not product.is_a("IfcProduct"):
+      warnings.append(f"Delete skipped for ifcId {entry.ifcId}: entity is not IfcProduct.")
+      continue
+    if _delete_ifc_product_if_leaf(model, product, warnings):
+      hard_deleted += 1
+
+  # 2) Apply placement and metadata updates on remaining IFC products.
+  for entry in request.metadata:
+    if entry.deleted:
+      continue
+    product = _safe_by_id(model, entry.ifcId)
     if product is None:
       warnings.append(f"Metadata references missing ifcId {entry.ifcId}")
+      continue
+    if not product.is_a("IfcProduct"):
+      warnings.append(f"Metadata skipped for ifcId {entry.ifcId}: entity is not IfcProduct.")
+      continue
+
+    if entry.position is not None:
+      try:
+        move_delta = _parse_move_delta_from_point(entry.moveDelta)
+        if move_delta is None:
+          move_delta = _parse_move_delta_from_custom(entry.custom)
+        if move_delta is None:
+          previous_position = _read_previous_exported_position(product)
+          if previous_position is not None:
+            move_delta = (
+              _safe_float(entry.position.x) - _safe_float(previous_position.x),
+              _safe_float(entry.position.y) - _safe_float(previous_position.y),
+              _safe_float(entry.position.z) - _safe_float(previous_position.z),
+            )
+
+        if move_delta is not None:
+          dx, dy, dz = move_delta
+          dx, dy, dz = _viewer_delta_to_ifc_world(dx, dy, dz)
+          dx *= viewer_to_model_units
+          dy *= viewer_to_model_units
+          dz *= viewer_to_model_units
+          if (
+            abs(dx) > 1e-9
+            or abs(dy) > 1e-9
+            or abs(dz) > 1e-9
+          ):
+            if _translate_product_by_delta(product, dx, dy, dz):
+              hard_moved += 1
+            else:
+              warnings.append(
+                f"Failed to move IFC element #{entry.ifcId}: unsupported ObjectPlacement."
+              )
+        else:
+          warnings.append(
+            f"Skipping absolute move for #{entry.ifcId}: missing movement delta baseline."
+          )
+      except Exception as exc:  # noqa: BLE001
+        warnings.append(f"Failed to move IFC element #{entry.ifcId}: {exc}")
+
+    if entry.custom:
+      hard_metadata_updates += _apply_metadata_custom_updates(model, product, entry.custom, warnings)
+
+  # 3) Add custom furniture as IfcBuildingElementProxy.
+  context = _find_representation_context(model)
+  for item in request.furniture:
+    try:
+      if _add_furniture_as_proxy(model, context, item, warnings):
+        hard_added += 1
+    except Exception as exc:  # noqa: BLE001
+      warnings.append(f'Failed to add furniture "{item.id}" as IFC proxy: {exc}')
+
+  exported_metadata = 0
+  for entry in request.metadata:
+    product = _safe_by_id(model, entry.ifcId)
+    if product is None:
+      # Deleted elements can be intentionally missing after hard export apply.
+      if not entry.deleted:
+        warnings.append(f"Metadata references missing ifcId {entry.ifcId}")
       continue
     try:
       pset = _get_or_create_pset(model, product, ELEMENT_STATE_PSET)
@@ -339,6 +959,8 @@ def _export_state(request: ExportStateRequest) -> ExportStateResponse:
         properties["CustomJson"] = _dump_json(entry.custom)
       if entry.position is not None:
         properties["PositionJson"] = _dump_json(entry.position.model_dump())
+      if entry.moveDelta is not None:
+        properties["MoveDeltaJson"] = _dump_json(entry.moveDelta.model_dump())
       ifcopenshell.api.run("pset.edit_pset", model, pset=pset, properties=properties)
       exported_metadata += 1
     except Exception as exc:  # noqa: BLE001
@@ -379,6 +1001,13 @@ def _export_state(request: ExportStateRequest) -> ExportStateResponse:
       )
     except Exception as exc:  # noqa: BLE001
       warnings.append(f"Failed to export history state: {exc}")
+
+  if hard_deleted or hard_moved or hard_metadata_updates or hard_added:
+    warnings.append(
+      "Hard IFC apply summary: "
+      + f"deleted={hard_deleted}, moved={hard_moved}, "
+      + f"metadataUpdates={hard_metadata_updates}, added={hard_added}"
+    )
 
   try:
     model.write(str(target_path))
