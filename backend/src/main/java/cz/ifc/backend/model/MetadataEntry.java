@@ -14,6 +14,10 @@ public class MetadataEntry {
   private Vector3 position;
   // Translation delta in world space relative to the original IFC position.
   private Vector3 moveDelta;
+  // World-space Euler rotation (radians) relative to original orientation.
+  private Vector3 rotation;
+  // Rotation delta used for hard IFC export apply.
+  private Vector3 rotateDelta;
   // Marks an IFC element as removed in the viewer (soft delete).
   private Boolean deleted;
   private Instant updatedAt;
@@ -59,6 +63,22 @@ public class MetadataEntry {
 
   public void setMoveDelta(Vector3 moveDelta) {
     this.moveDelta = moveDelta;
+  }
+
+  public Vector3 getRotation() {
+    return rotation;
+  }
+
+  public void setRotation(Vector3 rotation) {
+    this.rotation = rotation;
+  }
+
+  public Vector3 getRotateDelta() {
+    return rotateDelta;
+  }
+
+  public void setRotateDelta(Vector3 rotateDelta) {
+    this.rotateDelta = rotateDelta;
   }
 
   public Boolean getDeleted() {

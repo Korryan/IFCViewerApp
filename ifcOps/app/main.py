@@ -30,6 +30,7 @@ PSET_PROP_KEY_PATTERN = re.compile(r"^pset-(\d+)-(\d+)$")
 EDITABLE_DIRECT_ATTRIBUTES = {"Name", "Description", "ObjectType", "Tag", "LongName"}
 ROOM_NUMBER_KEYS = {"roomnumber", "raumnummer", "number"}
 MOVE_DELTA_CUSTOM_KEY = "__bakaMoveDeltaJson"
+ROTATE_DELTA_CUSTOM_KEY = "__bakaRotateDeltaJson"
 
 app = FastAPI(title="ifc-ops", version="0.1.0")
 
@@ -46,6 +47,8 @@ class MetadataEntry(BaseModel):
   custom: dict[str, Any] | None = None
   position: Point3D | None = None
   moveDelta: Point3D | None = None
+  rotation: Point3D | None = None
+  rotateDelta: Point3D | None = None
   deleted: bool | None = None
   updatedAt: str | None = None
 
@@ -276,6 +279,30 @@ def _import_state(request: ImportStateRequest) -> ImportStateResponse:
     if position is not None:
       item["position"] = position
 
+    move_delta = _try_json_point(
+      pset_values.get("MoveDeltaJson"),
+      warnings,
+      f"Metadata #{product.id()} MoveDeltaJson",
+    )
+    if move_delta is not None:
+      item["moveDelta"] = move_delta
+
+    rotation = _try_json_point(
+      pset_values.get("RotationJson"),
+      warnings,
+      f"Metadata #{product.id()} RotationJson",
+    )
+    if rotation is not None:
+      item["rotation"] = rotation
+
+    rotate_delta = _try_json_point(
+      pset_values.get("RotateDeltaJson"),
+      warnings,
+      f"Metadata #{product.id()} RotateDeltaJson",
+    )
+    if rotate_delta is not None:
+      item["rotateDelta"] = rotate_delta
+
     try:
       metadata_entries.append(MetadataEntry.model_validate(item))
     except Exception as exc:  # noqa: BLE001
@@ -357,9 +384,9 @@ def _safe_dim(value: Any, default: float = 1.0) -> float:
 
 
 def _build_ref_direction(rotation: Point3D | None) -> tuple[float, float, float]:
-  # Viewer stores rotation as Euler-like xyz values (radians). For now only yaw (z) is
-  # used for furniture orientation in IFC placement; this matches current 2D floor usage.
-  yaw = _safe_float(rotation.z if rotation is not None else 0.0, 0.0)
+  # Viewer uses Y-up coordinates, so horizontal yaw is stored on the viewer Y axis.
+  # IFC placement here is Z-up, therefore the horizontal ref direction comes from viewer Y.
+  yaw = _safe_float(rotation.y if rotation is not None else 0.0, 0.0)
   return (math.cos(yaw), math.sin(yaw), 0.0)
 
 
@@ -378,6 +405,26 @@ def _create_absolute_local_placement(
   )
   relative = model.createIfcAxis2Placement3D(location, axis, ref_direction)
   return model.createIfcLocalPlacement(None, relative)
+
+
+def _viewer_point_to_ifc_world(position: Point3D, viewer_to_model_units: float = 1.0) -> Point3D:
+  x = _safe_float(position.x) * viewer_to_model_units
+  y = _safe_float(position.y) * viewer_to_model_units
+  z = _safe_float(position.z) * viewer_to_model_units
+  ifc_x, ifc_y, ifc_z = _viewer_delta_to_ifc_world(x, y, z)
+  return Point3D(x=ifc_x, y=ifc_y, z=ifc_z)
+
+
+def _viewer_scale_to_ifc_box_dims(
+  scale: Point3D | None,
+  viewer_to_model_units: float = 1.0,
+) -> tuple[float, float, float]:
+  resolved = scale or Point3D(x=1.0, y=1.0, z=1.0)
+  # Viewer is X-right, Y-up, Z-depth. IFC box local axes here are X-right, Y-depth, Z-up.
+  width = _safe_dim(resolved.x, 1.0) * viewer_to_model_units
+  depth = _safe_dim(resolved.z, 1.0) * viewer_to_model_units
+  height = _safe_dim(resolved.y, 1.0) * viewer_to_model_units
+  return (width, depth, height)
 
 
 def _set_product_absolute_position(model: Any, product: Any, position: Point3D) -> None:
@@ -562,11 +609,13 @@ def _find_representation_context(model: Any) -> Any | None:
   return None
 
 
-def _create_box_representation(model: Any, context: Any, item: FurnitureItem) -> Any:
-  scale = item.scale or Point3D(x=1.0, y=1.0, z=1.0)
-  width = _safe_dim(scale.x, 1.0)
-  depth = _safe_dim(scale.y, 1.0)
-  height = _safe_dim(scale.z, 1.0)
+def _create_box_representation(
+  model: Any,
+  context: Any,
+  item: FurnitureItem,
+  viewer_to_model_units: float,
+) -> Any:
+  width, depth, height = _viewer_scale_to_ifc_box_dims(item.scale, viewer_to_model_units)
 
   profile_location = model.createIfcCartesianPoint((0.0, 0.0))
   profile_position = model.createIfcAxis2Placement2D(profile_location, None)
@@ -658,7 +707,13 @@ def _assign_product_to_spatial_structure(model: Any, product: Any, structure: An
   )
 
 
-def _add_furniture_as_proxy(model: Any, context: Any | None, item: FurnitureItem, warnings: list[str]) -> bool:
+def _add_furniture_as_proxy(
+  model: Any,
+  context: Any | None,
+  item: FurnitureItem,
+  viewer_to_model_units: float,
+  warnings: list[str],
+) -> bool:
   if context is None:
     warnings.append(f'Cannot add furniture "{item.id}": no IFC representation context found.')
     return False
@@ -667,9 +722,14 @@ def _add_furniture_as_proxy(model: Any, context: Any | None, item: FurnitureItem
   ref = _build_ref_direction(item.rotation)
   axis = model.createIfcDirection((0.0, 0.0, 1.0))
   ref_direction = model.createIfcDirection(ref)
-  placement = _create_absolute_local_placement(model, item.position, axis, ref_direction)
+  placement = _create_absolute_local_placement(
+    model,
+    _viewer_point_to_ifc_world(item.position, viewer_to_model_units),
+    axis,
+    ref_direction,
+  )
 
-  representation = _create_box_representation(model, context, item)
+  representation = _create_box_representation(model, context, item, viewer_to_model_units)
   proxy = model.create_entity(
     "IfcBuildingElementProxy",
     GlobalId=ifcopenshell.guid.new(),
@@ -704,7 +764,7 @@ def _add_furniture_as_proxy(model: Any, context: Any | None, item: FurnitureItem
 def _apply_metadata_custom_updates(model: Any, product: Any, custom: dict[str, Any], warnings: list[str]) -> int:
   updates = 0
   for key, value in custom.items():
-    if key == MOVE_DELTA_CUSTOM_KEY:
+    if key in {MOVE_DELTA_CUSTOM_KEY, ROTATE_DELTA_CUSTOM_KEY}:
       continue
     if _apply_custom_field_to_product(model, product, key, value, warnings):
       updates += 1
@@ -740,6 +800,35 @@ def _parse_move_delta_from_point(point: Point3D | None) -> tuple[float, float, f
   )
 
 
+def _parse_rotate_delta_from_custom(custom: dict[str, Any] | None) -> tuple[float, float, float] | None:
+  if not custom:
+    return None
+  raw = custom.get(ROTATE_DELTA_CUSTOM_KEY)
+  if not isinstance(raw, str) or not raw.strip():
+    return None
+  try:
+    parsed = json.loads(raw)
+  except json.JSONDecodeError:
+    return None
+  if not isinstance(parsed, dict):
+    return None
+  return (
+    _safe_float(parsed.get("x"), 0.0),
+    _safe_float(parsed.get("y"), 0.0),
+    _safe_float(parsed.get("z"), 0.0),
+  )
+
+
+def _parse_rotate_delta_from_point(point: Point3D | None) -> tuple[float, float, float] | None:
+  if point is None:
+    return None
+  return (
+    _safe_float(point.x, 0.0),
+    _safe_float(point.y, 0.0),
+    _safe_float(point.z, 0.0),
+  )
+
+
 def _parse_point_json(raw: Any) -> Point3D | None:
   if isinstance(raw, Point3D):
     return raw
@@ -759,6 +848,56 @@ def _parse_point_json(raw: Any) -> Point3D | None:
     )
   except Exception:
     return None
+
+
+def _normalize_direction(
+  values: tuple[float, float, float],
+  fallback: tuple[float, float, float],
+) -> tuple[float, float, float]:
+  x, y, z = values
+  length = math.sqrt(x * x + y * y + z * z)
+  if length <= 1e-12:
+    return fallback
+  return (x / length, y / length, z / length)
+
+
+def _dot3(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _cross3(
+  a: tuple[float, float, float],
+  b: tuple[float, float, float],
+) -> tuple[float, float, float]:
+  return (
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  )
+
+
+def _rotate_vector_xyz(
+  vector: tuple[float, float, float],
+  rx: float,
+  ry: float,
+  rz: float,
+) -> tuple[float, float, float]:
+  x, y, z = vector
+
+  if abs(rx) > 1e-12:
+    cx = math.cos(rx)
+    sx = math.sin(rx)
+    y, z = y * cx - z * sx, y * sx + z * cx
+  if abs(ry) > 1e-12:
+    cy = math.cos(ry)
+    sy = math.sin(ry)
+    x, z = x * cy + z * sy, -x * sy + z * cy
+  if abs(rz) > 1e-12:
+    cz = math.cos(rz)
+    sz = math.sin(rz)
+    x, y = x * cz - y * sz, x * sz + y * cz
+
+  return (x, y, z)
 
 
 def _read_previous_exported_position(product: Any) -> Point3D | None:
@@ -837,6 +976,91 @@ def _viewer_delta_to_ifc_world(dx: float, dy: float, dz: float) -> tuple[float, 
   return (dx, -dz, dy)
 
 
+def _viewer_rotation_to_ifc_world(rx: float, ry: float, rz: float) -> tuple[float, float, float]:
+  # Viewer rotation deltas are stored in viewer axes (X right, Y up, Z forward).
+  # IFC world in this pipeline is X right, Y depth, Z up.
+  # Mapping follows the same basis used for translation conversion.
+  return (rx, -rz, ry)
+
+
+def _rotate_product_by_delta(model: Any, product: Any, rx: float, ry: float, rz: float) -> bool:
+  placement = getattr(product, "ObjectPlacement", None)
+  if placement is None or not placement.is_a("IfcLocalPlacement"):
+    return False
+  relative = getattr(placement, "RelativePlacement", None)
+  if relative is None:
+    return False
+
+  if relative.is_a("IfcAxis2Placement3D"):
+    axis_dir = getattr(relative, "Axis", None)
+    ref_dir = getattr(relative, "RefDirection", None)
+    axis_values = tuple(getattr(axis_dir, "DirectionRatios", (0.0, 0.0, 1.0)) or (0.0, 0.0, 1.0))
+    ref_values = tuple(getattr(ref_dir, "DirectionRatios", (1.0, 0.0, 0.0)) or (1.0, 0.0, 0.0))
+
+    axis = _normalize_direction(
+      (
+        _safe_float(axis_values[0], 0.0),
+        _safe_float(axis_values[1], 0.0),
+        _safe_float(axis_values[2], 1.0),
+      ),
+      (0.0, 0.0, 1.0),
+    )
+    ref = _normalize_direction(
+      (
+        _safe_float(ref_values[0], 1.0),
+        _safe_float(ref_values[1], 0.0),
+        _safe_float(ref_values[2], 0.0),
+      ),
+      (1.0, 0.0, 0.0),
+    )
+
+    # Keep orthonormal basis before rotating.
+    ref_proj = _dot3(ref, axis)
+    ref = _normalize_direction(
+      (
+        ref[0] - axis[0] * ref_proj,
+        ref[1] - axis[1] * ref_proj,
+        ref[2] - axis[2] * ref_proj,
+      ),
+      (1.0, 0.0, 0.0),
+    )
+    axis = _normalize_direction(_cross3(ref, _cross3(axis, ref)), axis)
+
+    rotated_axis = _normalize_direction(_rotate_vector_xyz(axis, rx, ry, rz), axis)
+    rotated_ref = _normalize_direction(_rotate_vector_xyz(ref, rx, ry, rz), ref)
+
+    # Re-orthogonalize reference against new axis for valid Axis2Placement3D basis.
+    rotated_ref_proj = _dot3(rotated_ref, rotated_axis)
+    rotated_ref = _normalize_direction(
+      (
+        rotated_ref[0] - rotated_axis[0] * rotated_ref_proj,
+        rotated_ref[1] - rotated_axis[1] * rotated_ref_proj,
+        rotated_ref[2] - rotated_axis[2] * rotated_ref_proj,
+      ),
+      (1.0, 0.0, 0.0),
+    )
+
+    relative.Axis = model.createIfcDirection(rotated_axis)
+    relative.RefDirection = model.createIfcDirection(rotated_ref)
+    return True
+
+  if relative.is_a("IfcAxis2Placement2D"):
+    ref_dir = getattr(relative, "RefDirection", None)
+    ref_values = tuple(getattr(ref_dir, "DirectionRatios", (1.0, 0.0)) or (1.0, 0.0))
+    x = _safe_float(ref_values[0], 1.0)
+    y = _safe_float(ref_values[1], 0.0)
+    if abs(x) <= 1e-12 and abs(y) <= 1e-12:
+      x, y = 1.0, 0.0
+    angle = rz
+    ca = math.cos(angle)
+    sa = math.sin(angle)
+    nx, ny = x * ca - y * sa, x * sa + y * ca
+    relative.RefDirection = model.createIfcDirection((nx, ny))
+    return True
+
+  return False
+
+
 def _export_state(request: ExportStateRequest) -> ExportStateResponse:
   source_path = _resolve_existing_path(request.source_ifc_path, "source_ifc_path")
   target_path = _resolve_target_path(request.target_ifc_path)
@@ -859,6 +1083,7 @@ def _export_state(request: ExportStateRequest) -> ExportStateResponse:
 
   hard_deleted = 0
   hard_moved = 0
+  hard_rotated = 0
   hard_metadata_updates = 0
   hard_added = 0
 
@@ -926,6 +1151,27 @@ def _export_state(request: ExportStateRequest) -> ExportStateResponse:
       except Exception as exc:  # noqa: BLE001
         warnings.append(f"Failed to move IFC element #{entry.ifcId}: {exc}")
 
+    if entry.rotation is not None or entry.rotateDelta is not None:
+      try:
+        rotate_delta = _parse_rotate_delta_from_point(entry.rotateDelta)
+        if rotate_delta is None:
+          rotate_delta = _parse_rotate_delta_from_point(entry.rotation)
+        if rotate_delta is None:
+          rotate_delta = _parse_rotate_delta_from_custom(entry.custom)
+
+        if rotate_delta is not None:
+          rx, ry, rz = rotate_delta
+          rx, ry, rz = _viewer_rotation_to_ifc_world(rx, ry, rz)
+          if abs(rx) > 1e-9 or abs(ry) > 1e-9 or abs(rz) > 1e-9:
+            if _rotate_product_by_delta(model, product, rx, ry, rz):
+              hard_rotated += 1
+            else:
+              warnings.append(
+                f"Failed to rotate IFC element #{entry.ifcId}: unsupported ObjectPlacement."
+              )
+      except Exception as exc:  # noqa: BLE001
+        warnings.append(f"Failed to rotate IFC element #{entry.ifcId}: {exc}")
+
     if entry.custom:
       hard_metadata_updates += _apply_metadata_custom_updates(model, product, entry.custom, warnings)
 
@@ -933,7 +1179,7 @@ def _export_state(request: ExportStateRequest) -> ExportStateResponse:
   context = _find_representation_context(model)
   for item in request.furniture:
     try:
-      if _add_furniture_as_proxy(model, context, item, warnings):
+      if _add_furniture_as_proxy(model, context, item, viewer_to_model_units, warnings):
         hard_added += 1
     except Exception as exc:  # noqa: BLE001
       warnings.append(f'Failed to add furniture "{item.id}" as IFC proxy: {exc}')
@@ -961,6 +1207,10 @@ def _export_state(request: ExportStateRequest) -> ExportStateResponse:
         properties["PositionJson"] = _dump_json(entry.position.model_dump())
       if entry.moveDelta is not None:
         properties["MoveDeltaJson"] = _dump_json(entry.moveDelta.model_dump())
+      if entry.rotation is not None:
+        properties["RotationJson"] = _dump_json(entry.rotation.model_dump())
+      if entry.rotateDelta is not None:
+        properties["RotateDeltaJson"] = _dump_json(entry.rotateDelta.model_dump())
       ifcopenshell.api.run("pset.edit_pset", model, pset=pset, properties=properties)
       exported_metadata += 1
     except Exception as exc:  # noqa: BLE001
@@ -1002,11 +1252,11 @@ def _export_state(request: ExportStateRequest) -> ExportStateResponse:
     except Exception as exc:  # noqa: BLE001
       warnings.append(f"Failed to export history state: {exc}")
 
-  if hard_deleted or hard_moved or hard_metadata_updates or hard_added:
+  if hard_deleted or hard_moved or hard_rotated or hard_metadata_updates or hard_added:
     warnings.append(
       "Hard IFC apply summary: "
       + f"deleted={hard_deleted}, moved={hard_moved}, "
-      + f"metadataUpdates={hard_metadata_updates}, added={hard_added}"
+      + f"rotated={hard_rotated}, metadataUpdates={hard_metadata_updates}, added={hard_added}"
     )
 
   try:
