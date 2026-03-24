@@ -2,16 +2,21 @@ package cz.ifc.backend.model;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import java.time.Instant;
+import java.util.Map;
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class FurnitureItem {
   // Custom furniture / scene object placed on top of the IFC model.
   private String id;
   private String model;
+  private String name;
   private Vector3 position;
   private Vector3 rotation;
   private Vector3 scale;
   private String roomNumber;
+  private Integer spaceIfcId;
+  private Map<String, String> custom;
+  private FurnitureGeometry geometry;
   private Instant updatedAt;
 
   public FurnitureItem() {
@@ -31,6 +36,14 @@ public class FurnitureItem {
 
   public void setModel(String model) {
     this.model = model;
+  }
+
+  public String getName() {
+    return name;
+  }
+
+  public void setName(String name) {
+    this.name = name;
   }
 
   public Vector3 getPosition() {
@@ -63,6 +76,30 @@ public class FurnitureItem {
 
   public void setRoomNumber(String roomNumber) {
     this.roomNumber = roomNumber;
+  }
+
+  public Integer getSpaceIfcId() {
+    return spaceIfcId;
+  }
+
+  public void setSpaceIfcId(Integer spaceIfcId) {
+    this.spaceIfcId = spaceIfcId;
+  }
+
+  public Map<String, String> getCustom() {
+    return custom;
+  }
+
+  public void setCustom(Map<String, String> custom) {
+    this.custom = custom;
+  }
+
+  public FurnitureGeometry getGeometry() {
+    return geometry;
+  }
+
+  public void setGeometry(FurnitureGeometry geometry) {
+    this.geometry = geometry;
   }
 
   public Instant getUpdatedAt() {

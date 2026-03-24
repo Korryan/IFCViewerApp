@@ -53,13 +53,22 @@ class MetadataEntry(BaseModel):
   updatedAt: str | None = None
 
 
+class FurnitureGeometry(BaseModel):
+  positions: list[float] = Field(default_factory=list)
+  indices: list[int] = Field(default_factory=list)
+
+
 class FurnitureItem(BaseModel):
   id: str
   model: str
+  name: str | None = None
   position: Point3D
   rotation: Point3D | None = None
   scale: Point3D | None = None
   roomNumber: str | None = None
+  spaceIfcId: int | None = None
+  custom: dict[str, Any] | None = None
+  geometry: FurnitureGeometry | None = None
   updatedAt: str | None = None
 
 
@@ -324,7 +333,10 @@ def _import_state(request: ImportStateRequest) -> ImportStateResponse:
     )
     for index, raw_item in enumerate(furniture_items):
       try:
-        furniture_entries.append(FurnitureItem.model_validate(raw_item))
+        item = FurnitureItem.model_validate(raw_item)
+        if _has_baked_furniture_proxy(model, item):
+          continue
+        furniture_entries.append(item)
       except Exception as exc:  # noqa: BLE001
         warnings.append(f"Skipping invalid furniture item at index {index}: {exc}")
 
@@ -395,6 +407,7 @@ def _create_absolute_local_placement(
   position: Point3D,
   axis: Any = None,
   ref_direction: Any = None,
+  placement_rel_to: Any = None,
 ) -> Any:
   location = model.createIfcCartesianPoint(
     (
@@ -404,7 +417,29 @@ def _create_absolute_local_placement(
     )
   )
   relative = model.createIfcAxis2Placement3D(location, axis, ref_direction)
-  return model.createIfcLocalPlacement(None, relative)
+  return model.createIfcLocalPlacement(placement_rel_to, relative)
+
+
+def _world_point_to_local_relative(parent_placement: Any, point: Point3D) -> Point3D:
+  try:
+    matrix = ifcopenshell.util.placement.get_local_placement(parent_placement)
+  except Exception:
+    return point
+
+  try:
+    tx = float(matrix[0][3])
+    ty = float(matrix[1][3])
+    tz = float(matrix[2][3])
+    dx = _safe_float(point.x) - tx
+    dy = _safe_float(point.y) - ty
+    dz = _safe_float(point.z) - tz
+    return Point3D(
+      x=float(matrix[0][0]) * dx + float(matrix[1][0]) * dy + float(matrix[2][0]) * dz,
+      y=float(matrix[0][1]) * dx + float(matrix[1][1]) * dy + float(matrix[2][1]) * dz,
+      z=float(matrix[0][2]) * dx + float(matrix[1][2]) * dy + float(matrix[2][2]) * dz,
+    )
+  except Exception:
+    return point
 
 
 def _viewer_point_to_ifc_world(position: Point3D, viewer_to_model_units: float = 1.0) -> Point3D:
@@ -425,6 +460,21 @@ def _viewer_scale_to_ifc_box_dims(
   depth = _safe_dim(resolved.z, 1.0) * viewer_to_model_units
   height = _safe_dim(resolved.y, 1.0) * viewer_to_model_units
   return (width, depth, height)
+
+
+def _viewer_positions_to_ifc_vertices(
+  positions: list[float],
+  viewer_to_model_units: float = 1.0,
+) -> list[tuple[float, float, float]]:
+  vertices: list[tuple[float, float, float]] = []
+  for index in range(0, len(positions), 3):
+    if index + 2 >= len(positions):
+      break
+    x = _safe_float(positions[index]) * viewer_to_model_units
+    y = _safe_float(positions[index + 1]) * viewer_to_model_units
+    z = _safe_float(positions[index + 2]) * viewer_to_model_units
+    vertices.append(_viewer_delta_to_ifc_world(x, y, z))
+  return vertices
 
 
 def _set_product_absolute_position(model: Any, product: Any, position: Point3D) -> None:
@@ -630,6 +680,53 @@ def _create_box_representation(
   return model.createIfcProductDefinitionShape(None, None, [shape])
 
 
+def _create_mesh_representation(
+  model: Any,
+  context: Any,
+  geometry: FurnitureGeometry,
+  viewer_to_model_units: float,
+) -> Any | None:
+  if not geometry.positions or not geometry.indices:
+    return None
+
+  schema = str(getattr(model, "schema", "") or "").upper()
+  if schema.startswith("IFC2X3"):
+    return None
+
+  vertices = _viewer_positions_to_ifc_vertices(geometry.positions, viewer_to_model_units)
+  if len(vertices) < 3:
+    return None
+
+  faces: list[tuple[int, int, int]] = []
+  for index in range(0, len(geometry.indices), 3):
+    if index + 2 >= len(geometry.indices):
+      break
+    a = int(geometry.indices[index])
+    b = int(geometry.indices[index + 1])
+    c = int(geometry.indices[index + 2])
+    if a < 0 or b < 0 or c < 0:
+      continue
+    if a >= len(vertices) or b >= len(vertices) or c >= len(vertices):
+      continue
+    faces.append((a + 1, b + 1, c + 1))
+
+  if not faces:
+    return None
+
+  point_list = model.create_entity(
+    "IfcCartesianPointList3D",
+    CoordList=vertices,
+  )
+  face_set = model.create_entity(
+    "IfcTriangulatedFaceSet",
+    Coordinates=point_list,
+    CoordIndex=faces,
+    Closed=False,
+  )
+  shape = model.createIfcShapeRepresentation(context, "Body", "Tessellation", [face_set])
+  return model.createIfcProductDefinitionShape(None, None, [shape])
+
+
 def _normalize_room_number(value: Any) -> str:
   return str(value or "").strip().lower()
 
@@ -659,7 +756,26 @@ def _space_matches_room_number(space: Any, room_number: str) -> bool:
   return False
 
 
+def _has_baked_furniture_proxy(model: Any, item: FurnitureItem) -> bool:
+  item_id = str(item.id or "").strip()
+  if not item_id:
+    return False
+
+  for ifc_type in ("IfcFurnishingElement", "IfcBuildingElementProxy"):
+    for proxy in model.by_type(ifc_type):
+      tag = str(getattr(proxy, "Tag", "") or "").strip()
+      if tag == item_id:
+        return True
+  return False
+
+
 def _resolve_furniture_container(model: Any, item: FurnitureItem, warnings: list[str]) -> Any | None:
+  if item.spaceIfcId is not None:
+    target = _safe_by_id(model, item.spaceIfcId)
+    if target is not None and hasattr(target, "is_a") and target.is_a("IfcSpace"):
+      return target
+    warnings.append(f'Furniture "{item.id}" space #{item.spaceIfcId} not found, using fallback container.')
+
   if item.roomNumber:
     for space in model.by_type("IfcSpace"):
       if _space_matches_room_number(space, item.roomNumber):
@@ -718,10 +834,13 @@ def _add_furniture_as_proxy(
     warnings.append(f'Cannot add furniture "{item.id}": no IFC representation context found.')
     return False
 
+  container = _resolve_furniture_container(model, item, warnings)
   owner_history = _first_owner_history(model)
   ref = _build_ref_direction(item.rotation)
   axis = model.createIfcDirection((0.0, 0.0, 1.0))
   ref_direction = model.createIfcDirection(ref)
+  # Keep furnishing placement in project/world coordinates for better interoperability
+  # across viewers. Spatial containment is handled separately by IfcRelContainedInSpatialStructure.
   placement = _create_absolute_local_placement(
     model,
     _viewer_point_to_ifc_world(item.position, viewer_to_model_units),
@@ -729,12 +848,18 @@ def _add_furniture_as_proxy(
     ref_direction,
   )
 
-  representation = _create_box_representation(model, context, item, viewer_to_model_units)
+  representation = (
+    _create_mesh_representation(model, context, item.geometry, viewer_to_model_units)
+    if item.geometry is not None
+    else None
+  )
+  if representation is None:
+    representation = _create_box_representation(model, context, item, viewer_to_model_units)
   proxy = model.create_entity(
-    "IfcBuildingElementProxy",
+    "IfcFurnishingElement",
     GlobalId=ifcopenshell.guid.new(),
     OwnerHistory=owner_history,
-    Name=item.id or "Furniture",
+    Name=item.name or item.id or "Furniture",
     Description=None,
     ObjectType=item.model or "Furniture",
     ObjectPlacement=placement,
@@ -749,7 +874,6 @@ def _add_furniture_as_proxy(
     # Best effort; schema differences can reject this assignment.
     pass
 
-  container = _resolve_furniture_container(model, item, warnings)
   if container is None:
     warnings.append(f'Furniture "{item.id}" was created without spatial container.')
     return True
@@ -758,6 +882,13 @@ def _add_furniture_as_proxy(
     _assign_product_to_spatial_structure(model, proxy, container)
   except Exception as exc:  # noqa: BLE001
     warnings.append(f'Furniture "{item.id}" container assignment failed: {exc}')
+
+  if item.custom:
+    try:
+      pset = _get_or_create_pset(model, proxy, "Pset_Baka_FurnitureItem")
+      ifcopenshell.api.run("pset.edit_pset", model, pset=pset, properties=item.custom)
+    except Exception as exc:  # noqa: BLE001
+      warnings.append(f'Furniture "{item.id}" metadata export failed: {exc}')
   return True
 
 
@@ -1175,7 +1306,7 @@ def _export_state(request: ExportStateRequest) -> ExportStateResponse:
     if entry.custom:
       hard_metadata_updates += _apply_metadata_custom_updates(model, product, entry.custom, warnings)
 
-  # 3) Add custom furniture as IfcBuildingElementProxy.
+  # 3) Add custom furniture as IfcFurnishingElement.
   context = _find_representation_context(model)
   for item in request.furniture:
     try:
