@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Frontend build outputs
+dist/
+dist-ssr/
+**/dist/
+**/dist-ssr/
+**/*.tsbuildinfo
+
+# Java / backend build outputs
+target/
+**/target/
+
+# Local runtime data
+backend/data/
+**/data/
+
+# Temporary artifacts and logs
+*.log
+*.tmp
+*.cache
+*.tgz
+
+# IDE / editor files
+.idea/
+.vscode/
+**/.idea/
+**/.vscode/
+*.iml
+
+# OS noise
+.DS_Store
+Thumbs.db
+

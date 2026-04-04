@@ -1,11 +1,16 @@
 **/node_modules
 **/dist
+**/dist-ssr
 **/target
 **/.git
 **/.idea
 **/.vscode
+**/*.tsbuildinfo
+**/.DS_Store
+**/Thumbs.db
 backend/data
 *.log
 *.tmp
 *.cache
 *.iml
+*.tgz
