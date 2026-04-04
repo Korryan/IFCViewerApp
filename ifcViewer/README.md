@@ -1,42 +1,68 @@
-# IFC Viewer (React + Vite)
+# ifcViewer
 
-This project previews IFC models in a React (TypeScript) app using `ifc-viewer-component` built on `@thatopen/components` + Three.js.
+Frontend aplikace pro práci s IFC modely.
 
-## 1. Initialize the project
+Stack:
 
-```bash
-npm create vite@latest ifc-viewer-app -- --template react-ts
-cd ifc-viewer-app
+- React
+- TypeScript
+- Vite
+- `ifc-viewer-component`
+
+## Co frontend řeší
+
+- načtení uloženého IFC modelu z backendu
+- viewer, výběr, strom a room list
+- transformace objektů
+- metadata panel
+- prefaby a `Add object` menu
+- export a `Apply changes`
+
+## Závislost na komponentě
+
+Frontend používá lokální dependency:
+
+- `ifc-viewer-component: file:../../IFCViewerComponent`
+
+To znamená, že pro lokální běh musí vedle `IFCViewerApp` existovat i:
+
+- `../IFCViewerComponent`
+
+## Hlavní soubory
+
+- [src/App.tsx](C:\Users\adam\Desktop\Baka\IFCViewerApp\ifcViewer\src\App.tsx)
+  orchestrace frontendu, horní toolbar, saved models, prefabs a napojení na backend API
+
+- `src/api/ifcOpenShellApi.ts`
+  volání export/apply-state endpointů
+
+- frontend storage API volá backend pod:
+  - `/projects/{projectId}`
+
+## Spuštění
+
+```powershell
+cd C:\Users\adam\Desktop\Baka\IFCViewerApp\ifcViewer
 npm install
-```
-
-## 2. Install viewer libraries and static assets
-
-```bash
-npm install
-```
-
-Copy the IFC.js WebAssembly bundle so Vite can serve it:
-
-```
-/public
-  ifc/
-    web-ifc.wasm
-    web-ifc-mt.wasm
-    web-ifc-mt.worker.js
-```
-
-Add a sample model to `/public/test.ifc` (this repo uses the provided `bim.ifc`).
-
-## 3. Key components
-
-- `src/IfcViewer.tsx` creates the `IfcViewerAPI`, sets the WASM path, loads either the selected file or the bundled sample, and shows simple loading/error overlays.
-- `src/App.tsx` renders `<input type="file" accept=".ifc">`, shows the selected file name, and passes the file to `IfcViewer`.
-
-## 4. Run the dev server
-
-```bash
 npm run dev
 ```
 
-Open <http://localhost:5173>. Without picking a file the viewer loads `public/test.ifc`. Once a file is chosen you can orbit and zoom the geometry with the mouse.
+## Docker
+
+Docker build frontendu je definovaný v:
+
+- [Dockerfile](C:\Users\adam\Desktop\Baka\IFCViewerApp\ifcViewer\Dockerfile)
+
+Spouští se přes root compose:
+
+```powershell
+cd C:\Users\adam\Desktop\Baka\IFCViewerApp
+docker compose up -d --build frontend
+```
+
+## Poznámka
+
+Přesnější dokumentace celé aplikace je v:
+
+- [../README.md](C:\Users\adam\Desktop\Baka\IFCViewerApp\README.md)
+
