@@ -1,6 +1,6 @@
-# ifcViewer
+﻿# ifcViewer
 
-Frontend aplikace pro práci s IFC modely.
+Frontend application for IFC model work.
 
 Stack:
 
@@ -9,37 +9,37 @@ Stack:
 - Vite
 - `ifc-viewer-component`
 
-## Co frontend řeší
+## What the frontend handles
 
-- načtení uloženého IFC modelu z backendu
-- viewer, výběr, strom a room list
-- transformace objektů
+- loading stored IFC models from the backend
+- viewer, selection, tree and room list
+- object transforms
 - metadata panel
-- prefaby a `Add object` menu
-- export a `Apply changes`
+- prefabs and the `Add object` menu
+- export and `Apply changes`
 
-## Závislost na komponentě
+## Component dependency
 
-Frontend používá lokální dependency:
+The frontend uses a local dependency:
 
 - `ifc-viewer-component: file:../../IFCViewerComponent`
 
-To znamená, že pro lokální běh musí vedle `IFCViewerApp` existovat i:
+That means local development requires this sibling directory next to `IFCViewerApp`:
 
 - `../IFCViewerComponent`
 
-## Hlavní soubory
+## Main files
 
 - [src/App.tsx](C:\Users\adam\Desktop\Baka\IFCViewerApp\ifcViewer\src\App.tsx)
-  orchestrace frontendu, horní toolbar, saved models, prefabs a napojení na backend API
+  frontend orchestration, top toolbar, saved models, prefabs and backend API wiring
 
 - `src/api/ifcOpenShellApi.ts`
-  volání export/apply-state endpointů
+  calls export and apply-state endpoints
 
-- frontend storage API volá backend pod:
+- backend API base:
   - `/projects/{projectId}`
 
-## Spuštění
+## Running
 
 ```powershell
 cd C:\Users\adam\Desktop\Baka\IFCViewerApp\ifcViewer
@@ -49,20 +49,19 @@ npm run dev
 
 ## Docker
 
-Docker build frontendu je definovaný v:
+Frontend Docker build is defined in:
 
 - [Dockerfile](C:\Users\adam\Desktop\Baka\IFCViewerApp\ifcViewer\Dockerfile)
 
-Spouští se přes root compose:
+Run through root compose:
 
 ```powershell
 cd C:\Users\adam\Desktop\Baka\IFCViewerApp
 docker compose up -d --build frontend
 ```
 
-## Poznámka
+## Note
 
-Přesnější dokumentace celé aplikace je v:
+More complete application-level documentation is in:
 
 - [../README.md](C:\Users\adam\Desktop\Baka\IFCViewerApp\README.md)
-

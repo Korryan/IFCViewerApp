@@ -1,44 +1,44 @@
-# ifcOps
+﻿# ifcOps
 
-`ifcOps` je Python service nad IfcOpenShell. Její hlavní vstup je:
+`ifcOps` is a Python service on top of IfcOpenShell. Its main entry point is:
 
 - [main.py](C:\Users\adam\Desktop\Baka\IFCViewerApp\ifcOps\app\main.py)
 
-Úkol služby:
+The service is responsible for:
 
-- vzít uložený editor state
-- otevřít source IFC
-- promítnout změny do skutečného IFC souboru
+- taking stored editor state
+- opening the source IFC
+- projecting changes into a real IFC file
 
-Používá se hlavně pro:
+It is used mainly for:
 
 - `Export file`
 - `Apply changes`
 
-## Co `main.py` dělá
+## What `main.py` does
 
-Soubor obsahuje:
+The file contains:
 
-1. FastAPI aplikaci
-2. Pydantic request/response modely
-3. helpery pro bezpečnou práci s IFC entitami
-4. převody viewer souřadnic do IFC souřadnic
-5. hard export změn do IFC
+1. the FastAPI app
+2. Pydantic request and response models
+3. helpers for safe IFC entity handling
+4. viewer-to-IFC coordinate conversion
+5. hard export into IFC
 
-Hlavní endpointy:
+Main endpoints:
 
 - `GET /health`
 - `POST /state/import`
 - `POST /state/export`
 
-## Data modely
+## Data models
 
-Nejdůležitější request modely:
+Important request models:
 
 - `ImportStateRequest`
 - `ExportStateRequest`
 
-Export request obsahuje:
+The export request contains:
 
 - `source_ifc_path`
 - `target_ifc_path`
@@ -46,88 +46,88 @@ Export request obsahuje:
 - `furniture`
 - `history`
 
-Nejdůležitější entity editor state:
+Important editor-state entities:
 
 - `MetadataEntry`
-  změny nad původními IFC prvky
+  changes for original IFC elements
 - `FurnitureItem`
-  nové vložené objekty, prefaby a custom mesh objekty
+  newly inserted objects, prefabs and custom mesh objects
 - `HistoryEntry`
-  audit / UI historie změn
+  audit or UI history of changes
 
 ## Import
 
-Funkce:
+Function:
 
 - `_import_state(...)`
 
-Aktuální stav:
+Current state:
 
-- import embedded editor state je vypnutý
-- endpoint vrací prázdné:
+- embedded editor-state import is disabled
+- the endpoint returns empty:
   - `metadata`
   - `furniture`
   - `history`
 
-To znamená:
+This means:
 
-- source IFC se při uploadu neparsuje na starý editor state
-- editor state se drží primárně v backend JSON souborech
+- source IFC is not parsed into old editor state during upload
+- editor state is kept primarily in backend JSON files
 
 ## Export pipeline
 
-Hlavní export je:
+Main export function:
 
 - `_export_state(...)`
 
-Postup:
+Steps:
 
-1. validace `source_ifc_path` a `target_ifc_path`
-2. otevření source IFC přes IfcOpenShell
-3. vyčištění technických editor PSETů
-4. aplikace změn na původní IFC entity
-5. přidání nových objektů jako IFC produktů
-6. zapsání nového IFC do `target_ifc_path`
+1. validate `source_ifc_path` and `target_ifc_path`
+2. open source IFC through IfcOpenShell
+3. purge technical editor PSETs
+4. apply changes to original IFC entities
+5. add new objects as IFC products
+6. write the new IFC into `target_ifc_path`
 
-### 1. Čištění editor state
+### 1. Purging editor state
 
-Před finálním exportem se odstraňují:
+Before final export, the service removes:
 
 - `Pset_Baka_State`
 - `Pset_Baka_Furniture`
 - `Pset_Baka_History`
 
-To je důležité proto, aby se při dalším uploadu už nepřepisovala pozice nebo rotace podle starého editor stavu.
+This matters because a later upload must not reapply old editor state for position or rotation.
 
-### 2. Původní IFC prvky
+### 2. Original IFC elements
 
-Změny se aplikují přes `metadata`:
+Changes are applied through `metadata`:
 
 - delete
 - move
 - rotate
-- změna přímých atributů (`Name`, `Description`, `ObjectType`, `Tag`, `LongName`)
-- změna custom PSET polí
+- direct attribute changes (`Name`, `Description`, `ObjectType`, `Tag`, `LongName`)
+- custom PSET field changes
 
-Relevantní helpery:
+Relevant helpers:
 
 - `_set_product_absolute_position(...)`
 - `_rotate_product_by_delta(...)`
 - `_apply_metadata_custom_updates(...)`
 - `_delete_ifc_product_if_leaf(...)`
 
-### 3. Přidané objekty
+### 3. Added objects
 
-Přidané objekty jdou přes `FurnitureItem`.
+Added objects go through `FurnitureItem`.
 
-Export umí:
+Export supports:
 
-- box fallback geometrii
-- triangulovaný mesh
-- IFC kontejnery podle room / space
+- box fallback geometry
+- triangulated mesh
+- IFC containers by room or space
 - `IfcFurnishingElement`
 
-Relevantní helpery:
+Relevant helpers:
 
 - `_resolve_furniture_container(...)`
 - `_resolve_furniture_ifc_world_position(...)`
@@ -135,27 +135,27 @@ Relevantní helpery:
 - `_create_mesh_representation(...)`
 - `_add_furniture_as_proxy(...)`
 
-Poznámka:
+Note:
 
-- název helperu `_add_furniture_as_proxy` je historický
-- aktuálně vytváří furnishing element export, ne jen obecný proxy fallback
+- the `_add_furniture_as_proxy` name is historical
+- it currently creates furnishing-element export, not just a generic proxy fallback
 
-## Souřadnice a transformace
+## Coordinates and transforms
 
-`main.py` má vlastní vrstvu pro převod viewer souřadnic do IFC:
+`main.py` has its own layer for viewer-to-IFC conversion:
 
 - `_viewer_point_to_ifc_world(...)`
 - `_viewer_delta_to_ifc_world(...)`
 - `_viewer_rotation_to_ifc_world(...)`
 
-Dále řeší:
+It also handles:
 
-- parent placement chain
-- převod world bodu do lokálního parent placementu
-- room-relative pozice přidaných objektů
-- čtení geometrického anchoru room z IFC reprezentace
+- parent placement chains
+- converting world points into local parent placement coordinates
+- room-relative positions of added objects
+- reading the geometric room anchor from IFC representation
 
-Relevantní helpery:
+Relevant helpers:
 
 - `_create_absolute_local_placement(...)`
 - `_world_point_to_local_relative(...)`
@@ -163,57 +163,56 @@ Relevantní helpery:
 - `_read_space_geometric_anchor_world(...)`
 - `_read_product_geometric_anchor_world(...)`
 
-## Bezpečnost a validace
+## Safety and validation
 
-Souborové cesty:
+Path validation helpers:
 
 - `_resolve_existing_path(...)`
 - `_resolve_target_path(...)`
 
-Obě hlídají, aby cesty zůstaly uvnitř:
+Both ensure paths stay inside:
 
 - `IFC_OPS_DATA_ROOT`
 
-To brání zápisu mimo storage root.
+This prevents writes outside the storage root.
 
-Bezpečné IFC helpery:
+Safe IFC helpers:
 
 - `_safe_by_id(...)`
 - `_try_json_dict(...)`
 - `_try_json_point(...)`
 - `_try_json_list(...)`
 
-Tyto helpery mají zabránit pádu exportu na rozbitých nebo neúplných datech.
+These helpers are there to avoid export crashes on broken or incomplete data.
 
-## Spuštění
+## Running
 
-Nejčastěji přes Docker Compose z rootu aplikace:
+Most often through Docker Compose from the app root:
 
 ```powershell
 cd C:\Users\adam\Desktop\Baka\IFCViewerApp
 docker compose up -d --build ifc-ops
 ```
 
-Service používá:
+The service uses:
 
 - `IFC_OPS_DATA_ROOT=/data`
 
-## Kdy sáhnout do `main.py`
+## When to edit `main.py`
 
-`main.py` je správné místo pro změny, když řešíš:
+`main.py` is the right place when you are changing:
 
-- hard export do IFC
-- IFC placement / rotaci
-- přiřazení nových objektů do room nebo storey
-- čištění technických PSETů
-- mapování viewer state do IfcOpenShell
+- hard export into IFC
+- IFC placement or rotation
+- assigning new objects into rooms or storeys
+- removing technical editor PSETs
+- mapping viewer state into IfcOpenShell
 
-Není to správné místo pro:
+It is not the right place for:
 
-- UI strom
-- výběr objektů
+- UI tree
+- object selection
 - rooms panel
-- shortcuty nebo kameru
+- shortcuts or camera logic
 
-Ty patří do frontendu a `IFCViewerComponent`.
-
+Those belong in the frontend and `IFCViewerComponent`.
