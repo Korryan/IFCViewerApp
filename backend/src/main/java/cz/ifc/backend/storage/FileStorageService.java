@@ -43,7 +43,11 @@ public class FileStorageService {
   private static final String MODEL_FILE = "model.ifc";
   private static final String MODEL_MANIFEST_FILE = "model.json";
   private static final String MODEL_EXPORTS_DIR = "exports";
+  private static final String PREFABS_DIR = "prefabs";
+  private static final String PREFAB_FILE = "prefab.ifc";
+  private static final String PREFAB_MANIFEST_FILE = "prefab.json";
   private static final Pattern MODEL_ID_PATTERN = Pattern.compile("^[A-Za-z0-9_-]+$");
+  private static final Pattern PREFAB_ID_PATTERN = Pattern.compile("^[A-Za-z0-9_-]+$");
   private static final Pattern MODEL_EXPORT_FILE_PATTERN = Pattern.compile("^[A-Za-z0-9._-]+$");
 
   // Base directory for file-backed storage.
@@ -65,6 +69,9 @@ public class FileStorageService {
   public record StoredModelInfo(String modelId, String fileName, Instant createdAt, Instant updatedAt) {}
 
   private record StoredModelManifest(String modelId, String fileName, Instant createdAt, Instant updatedAt) {}
+  public record StoredPrefabInfo(String prefabId, String fileName, Instant createdAt, Instant updatedAt) {}
+
+  private record StoredPrefabManifest(String prefabId, String fileName, Instant createdAt, Instant updatedAt) {}
 
   // Read project metadata list from disk.
   public List<MetadataEntry> readMetadata(String projectId) {
@@ -186,10 +193,69 @@ public class FileStorageService {
     }
   }
 
+  public StoredPrefabInfo storeUploadedPrefab(String projectId, MultipartFile file) {
+    if (file == null || file.isEmpty()) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Missing IFC prefab file");
+    }
+
+    String originalFileName = sanitizeUploadFileName(file.getOriginalFilename());
+    String prefabId = buildModelId(originalFileName);
+    Path prefabDir = resolvePrefabDir(projectId, prefabId);
+    Path ifcFilePath = prefabDir.resolve(PREFAB_FILE);
+    Path manifestPath = prefabDir.resolve(PREFAB_MANIFEST_FILE);
+    Instant now = Instant.now();
+
+    ReentrantReadWriteLock prefabFileLock = lockFor(ifcFilePath);
+    prefabFileLock.writeLock().lock();
+    try {
+      Files.createDirectories(prefabDir);
+      try (InputStream inputStream = file.getInputStream()) {
+        writeBinaryAtomically(ifcFilePath, inputStream);
+      }
+      StoredPrefabManifest manifest = new StoredPrefabManifest(prefabId, originalFileName, now, now);
+      writeAtomically(manifestPath, manifest);
+      return toStoredPrefabInfo(manifest);
+    } catch (IOException ex) {
+      throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to store prefab IFC file", ex);
+    } finally {
+      prefabFileLock.writeLock().unlock();
+    }
+  }
+
+  public List<StoredPrefabInfo> listPrefabs(String projectId) {
+    Path prefabsDir = resolvePrefabsDir(projectId);
+    if (!Files.isDirectory(prefabsDir)) {
+      return new ArrayList<>();
+    }
+
+    try (var stream = Files.list(prefabsDir)) {
+      return stream
+          .filter(Files::isDirectory)
+          .map(this::readStoredPrefabInfoSafe)
+          .filter(Objects::nonNull)
+          .sorted(
+              Comparator.comparing(
+                      StoredPrefabInfo::updatedAt,
+                      Comparator.nullsLast(Comparator.naturalOrder()))
+                  .reversed())
+          .toList();
+    } catch (IOException ex) {
+      throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to list prefabs", ex);
+    }
+  }
+
   public Path getModelIfcPath(String projectId, String modelId) {
     Path ifcFilePath = resolveModelDir(projectId, modelId).resolve(MODEL_FILE);
     if (!Files.isRegularFile(ifcFilePath)) {
       throw new ResponseStatusException(HttpStatus.NOT_FOUND, "IFC model file not found");
+    }
+    return ifcFilePath;
+  }
+
+  public Path getPrefabIfcPath(String projectId, String prefabId) {
+    Path ifcFilePath = resolvePrefabDir(projectId, prefabId).resolve(PREFAB_FILE);
+    if (!Files.isRegularFile(ifcFilePath)) {
+      throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Prefab IFC file not found");
     }
     return ifcFilePath;
   }
@@ -204,6 +270,76 @@ public class FileStorageService {
       throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Model metadata not found");
     }
     return info;
+  }
+
+  public StoredModelInfo replaceModelIfc(String projectId, String modelId, Path sourceIfcPath) {
+    if (sourceIfcPath == null || !Files.isRegularFile(sourceIfcPath)) {
+      throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Exported IFC file not found");
+    }
+
+    Path targetIfcPath = resolveModelDir(projectId, modelId).resolve(MODEL_FILE);
+    ReentrantReadWriteLock modelFileLock = lockFor(targetIfcPath);
+    modelFileLock.writeLock().lock();
+    try (InputStream inputStream = Files.newInputStream(sourceIfcPath)) {
+      Files.createDirectories(targetIfcPath.getParent());
+      writeBinaryAtomically(targetIfcPath, inputStream);
+      touchModelManifest(projectId, modelId);
+      return getModelInfo(projectId, modelId);
+    } catch (IOException ex) {
+      throw new ResponseStatusException(
+          HttpStatus.INTERNAL_SERVER_ERROR, "Failed to replace stored IFC file", ex);
+    } finally {
+      modelFileLock.writeLock().unlock();
+    }
+  }
+
+  public void resetModelState(String projectId, String modelId) {
+    Path metadataPath = resolveModelFile(projectId, modelId, METADATA_FILE);
+    Path furniturePath = resolveModelFile(projectId, modelId, FURNITURE_FILE);
+    Path historyPath = resolveModelFile(projectId, modelId, HISTORY_FILE);
+    writeList(metadataPath, new ArrayList<MetadataEntry>());
+    writeList(furniturePath, new ArrayList<FurnitureItem>());
+    writeList(historyPath, new ArrayList<HistoryEntry>());
+    touchModelManifest(projectId, modelId);
+  }
+
+  public void deleteIfExists(Path path) {
+    if (path == null) {
+      return;
+    }
+    try {
+      Files.deleteIfExists(path);
+    } catch (IOException ex) {
+      log.warn("Failed to delete temporary file {}", path, ex);
+    }
+  }
+
+  public StoredPrefabInfo getPrefabInfo(String projectId, String prefabId) {
+    Path prefabDir = resolvePrefabDir(projectId, prefabId);
+    if (!Files.isDirectory(prefabDir)) {
+      throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Prefab not found");
+    }
+    StoredPrefabInfo info = readStoredPrefabInfoSafe(prefabDir);
+    if (info == null) {
+      throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Prefab metadata not found");
+    }
+    return info;
+  }
+
+  public void deleteModel(String projectId, String modelId) {
+    Path modelDir = resolveModelDir(projectId, modelId);
+    if (!Files.isDirectory(modelDir)) {
+      throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Model not found");
+    }
+    deleteRecursively(modelDir, "model");
+  }
+
+  public void deletePrefab(String projectId, String prefabId) {
+    Path prefabDir = resolvePrefabDir(projectId, prefabId);
+    if (!Files.isDirectory(prefabDir)) {
+      throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Prefab not found");
+    }
+    deleteRecursively(prefabDir, "prefab");
   }
 
   public Path createModelExportIfcPath(String projectId, String modelId, String exportKind) {
@@ -328,6 +464,10 @@ public class FileStorageService {
     return resolveProjectDir(projectId).resolve(MODELS_DIR);
   }
 
+  private Path resolvePrefabsDir(String projectId) {
+    return resolveProjectDir(projectId).resolve(PREFABS_DIR);
+  }
+
   private Path resolveModelDir(String projectId, String modelId) {
     if (!MODEL_ID_PATTERN.matcher(modelId).matches()) {
       throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid modelId");
@@ -338,6 +478,18 @@ public class FileStorageService {
       throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid modelId");
     }
     return modelDir;
+  }
+
+  private Path resolvePrefabDir(String projectId, String prefabId) {
+    if (!PREFAB_ID_PATTERN.matcher(prefabId).matches()) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid prefabId");
+    }
+    Path prefabsDir = resolvePrefabsDir(projectId);
+    Path prefabDir = prefabsDir.resolve(prefabId).normalize();
+    if (!prefabDir.startsWith(prefabsDir)) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid prefabId");
+    }
+    return prefabDir;
   }
 
   private Path resolveModelFile(String projectId, String modelId, String fileName) {
@@ -440,6 +592,38 @@ public class FileStorageService {
     return new StoredModelInfo(modelId, fileName, createdAt, updatedAt);
   }
 
+  private StoredPrefabInfo toStoredPrefabInfo(StoredPrefabManifest manifest) {
+    Instant createdAt = manifest.createdAt() != null ? manifest.createdAt() : Instant.now();
+    Instant updatedAt = manifest.updatedAt() != null ? manifest.updatedAt() : createdAt;
+    String prefabId = manifest.prefabId() != null ? manifest.prefabId() : "unknown";
+    String fileName = manifest.fileName() != null ? manifest.fileName() : prefabId + ".ifc";
+    return new StoredPrefabInfo(prefabId, fileName, createdAt, updatedAt);
+  }
+
+  private StoredPrefabInfo readStoredPrefabInfoSafe(Path prefabDir) {
+    try {
+      Path manifestPath = prefabDir.resolve(PREFAB_MANIFEST_FILE);
+      StoredPrefabManifest manifest;
+      if (Files.isRegularFile(manifestPath)) {
+        manifest = objectMapper.readValue(manifestPath.toFile(), StoredPrefabManifest.class);
+      } else {
+        FileTime fileTime =
+            Files.exists(prefabDir) ? Files.getLastModifiedTime(prefabDir) : FileTime.from(Instant.EPOCH);
+        Instant fallbackTime = fileTime.toInstant();
+        manifest =
+            new StoredPrefabManifest(
+                prefabDir.getFileName().toString(),
+                prefabDir.getFileName().toString() + ".ifc",
+                fallbackTime,
+                fallbackTime);
+      }
+      return toStoredPrefabInfo(manifest);
+    } catch (IOException ex) {
+      log.warn("Skipping unreadable prefab directory {}", prefabDir, ex);
+      return null;
+    }
+  }
+
   private String sanitizeUploadFileName(String originalFileName) {
     if (originalFileName == null || originalFileName.isBlank()) {
       return "model.ifc";
@@ -468,6 +652,29 @@ public class FileStorageService {
     }
     String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
     return slug + "-" + suffix;
+  }
+
+  private void deleteRecursively(Path targetDir, String label) {
+    try (var walk = Files.walk(targetDir)) {
+      walk.sorted(Comparator.reverseOrder())
+          .forEach(
+              path -> {
+                try {
+                  Files.deleteIfExists(path);
+                } catch (IOException ex) {
+                  throw new RuntimeException(ex);
+                }
+              });
+    } catch (RuntimeException ex) {
+      if (ex.getCause() instanceof IOException ioEx) {
+        throw new ResponseStatusException(
+            HttpStatus.INTERNAL_SERVER_ERROR, "Failed to delete " + label, ioEx);
+      }
+      throw ex;
+    } catch (IOException ex) {
+      throw new ResponseStatusException(
+          HttpStatus.INTERNAL_SERVER_ERROR, "Failed to delete " + label, ex);
+    }
   }
 
   // Normalize metadata list and apply server-side timestamp.

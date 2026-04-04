@@ -12,6 +12,10 @@ from typing import Any
 
 import ifcopenshell
 import ifcopenshell.api
+try:
+  import ifcopenshell.geom as ifcopenshell_geom
+except Exception:  # pragma: no cover - optional geometry module
+  ifcopenshell_geom = None
 import ifcopenshell.guid
 import ifcopenshell.util.element
 import ifcopenshell.util.placement
@@ -36,6 +40,7 @@ PLACEMENT_POSITION_CUSTOM_KEY = "__bakaPlacementPositionJson"
 SPACE_RELATIVE_POSITION_CUSTOM_KEY = "__bakaSpaceRelativePositionJson"
 
 app = FastAPI(title="ifc-ops", version="0.1.0")
+_WORLD_GEOM_SETTINGS: Any | None = None
 
 
 class Point3D(BaseModel):
@@ -341,11 +346,29 @@ def _safe_dim(value: Any, default: float = 1.0) -> float:
   return parsed
 
 
-def _build_ref_direction(rotation: Point3D | None) -> tuple[float, float, float]:
-  # Viewer uses Y-up coordinates, so horizontal yaw is stored on the viewer Y axis.
-  # IFC placement here is Z-up, therefore the horizontal ref direction comes from viewer Y.
-  yaw = _safe_float(rotation.y if rotation is not None else 0.0, 0.0)
-  return (math.cos(yaw), math.sin(yaw), 0.0)
+def _build_furniture_axis_basis(
+  rotation: Point3D | None,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+  if rotation is None:
+    return ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0))
+
+  rx, ry, rz = _viewer_rotation_to_ifc_world(
+    _safe_float(rotation.x, 0.0),
+    _safe_float(rotation.y, 0.0),
+    _safe_float(rotation.z, 0.0),
+  )
+  axis = _normalize_direction(_rotate_vector_xyz((0.0, 0.0, 1.0), rx, ry, rz), (0.0, 0.0, 1.0))
+  ref = _normalize_direction(_rotate_vector_xyz((1.0, 0.0, 0.0), rx, ry, rz), (1.0, 0.0, 0.0))
+  ref_proj = _dot3(ref, axis)
+  ref = _normalize_direction(
+    (
+      ref[0] - axis[0] * ref_proj,
+      ref[1] - axis[1] * ref_proj,
+      ref[2] - axis[2] * ref_proj,
+    ),
+    (1.0, 0.0, 0.0),
+  )
+  return (axis, ref)
 
 
 def _create_absolute_local_placement(
@@ -386,6 +409,40 @@ def _world_point_to_local_relative(parent_placement: Any, point: Point3D) -> Poi
     )
   except Exception:
     return point
+
+
+def _placement_rotation_matrix(placement: Any) -> list[list[float]] | None:
+  if placement is None:
+    return None
+  try:
+    matrix = ifcopenshell.util.placement.get_local_placement(placement)
+  except Exception:
+    return None
+  if matrix is None:
+    return None
+  try:
+    return [
+      [float(matrix[0][0]), float(matrix[0][1]), float(matrix[0][2])],
+      [float(matrix[1][0]), float(matrix[1][1]), float(matrix[1][2])],
+      [float(matrix[2][0]), float(matrix[2][1]), float(matrix[2][2])],
+    ]
+  except Exception:
+    return None
+
+
+def _world_vector_to_local_relative(
+  parent_placement: Any,
+  vector: tuple[float, float, float],
+) -> tuple[float, float, float]:
+  rotation = _placement_rotation_matrix(parent_placement)
+  if rotation is None:
+    return vector
+  dx, dy, dz = vector
+  return (
+    rotation[0][0] * dx + rotation[1][0] * dy + rotation[2][0] * dz,
+    rotation[0][1] * dx + rotation[1][1] * dy + rotation[2][1] * dz,
+    rotation[0][2] * dx + rotation[1][2] * dy + rotation[2][2] * dz,
+  )
 
 
 def _viewer_point_to_ifc_world(position: Point3D, viewer_to_model_units: float = 1.0) -> Point3D:
@@ -430,6 +487,225 @@ def _apply_viewer_affine_matrix(point: Point3D, matrix: list[float] | None) -> P
     return point
 
 
+def _safe_point_coords(entity: Any, expected_len: int = 3) -> tuple[float, ...] | None:
+  coords = getattr(entity, "Coordinates", None)
+  if coords is None:
+    return None
+  values = tuple(_safe_float(value) for value in coords)
+  if len(values) < expected_len:
+    return None
+  return values
+
+
+def _transform_point_by_matrix(point: Point3D, matrix: Any) -> Point3D:
+  try:
+    x = _safe_float(point.x)
+    y = _safe_float(point.y)
+    z = _safe_float(point.z)
+    return Point3D(
+      x=float(matrix[0][0]) * x + float(matrix[0][1]) * y + float(matrix[0][2]) * z + float(matrix[0][3]),
+      y=float(matrix[1][0]) * x + float(matrix[1][1]) * y + float(matrix[1][2]) * z + float(matrix[1][3]),
+      z=float(matrix[2][0]) * x + float(matrix[2][1]) * y + float(matrix[2][2]) * z + float(matrix[2][3]),
+    )
+  except Exception:
+    return point
+
+
+def _axis2placement3d_to_matrix(placement: Any | None) -> list[list[float]] | None:
+  if placement is None or not hasattr(placement, "is_a") or not placement.is_a("IfcAxis2Placement3D"):
+    return None
+
+  location = getattr(placement, "Location", None)
+  coords = _safe_point_coords(location, 3)
+  if coords is None:
+    return None
+
+  axis_dir = getattr(placement, "Axis", None)
+  ref_dir = getattr(placement, "RefDirection", None)
+  axis_values = tuple(getattr(axis_dir, "DirectionRatios", (0.0, 0.0, 1.0)) or (0.0, 0.0, 1.0))
+  ref_values = tuple(getattr(ref_dir, "DirectionRatios", (1.0, 0.0, 0.0)) or (1.0, 0.0, 0.0))
+
+  axis = _normalize_direction(
+    (
+      _safe_float(axis_values[0], 0.0),
+      _safe_float(axis_values[1], 0.0),
+      _safe_float(axis_values[2], 1.0),
+    ),
+    (0.0, 0.0, 1.0),
+  )
+  ref = _normalize_direction(
+    (
+      _safe_float(ref_values[0], 1.0),
+      _safe_float(ref_values[1], 0.0),
+      _safe_float(ref_values[2], 0.0),
+    ),
+    (1.0, 0.0, 0.0),
+  )
+
+  ref_proj = _dot3(ref, axis)
+  ref = _normalize_direction(
+    (
+      ref[0] - axis[0] * ref_proj,
+      ref[1] - axis[1] * ref_proj,
+      ref[2] - axis[2] * ref_proj,
+    ),
+    (1.0, 0.0, 0.0),
+  )
+  side = _normalize_direction(_cross3(axis, ref), (0.0, 1.0, 0.0))
+
+  return [
+    [ref[0], side[0], axis[0], coords[0]],
+    [ref[1], side[1], axis[1], coords[1]],
+    [ref[2], side[2], axis[2], coords[2]],
+    [0.0, 0.0, 0.0, 1.0],
+  ]
+
+
+def _read_profile_anchor_xy(profile: Any) -> tuple[float, float] | None:
+  if profile is None or not hasattr(profile, "is_a"):
+    return None
+
+  if profile.is_a("IfcRectangleProfileDef"):
+    position = getattr(profile, "Position", None)
+    location = getattr(position, "Location", None)
+    coords = _safe_point_coords(location, 2) or (0.0, 0.0)
+    return (_safe_float(coords[0]), _safe_float(coords[1]))
+
+  outer_curve = getattr(profile, "OuterCurve", None)
+  if outer_curve is None or not hasattr(outer_curve, "is_a"):
+    return None
+  if not outer_curve.is_a("IfcPolyline"):
+    return None
+
+  points: list[tuple[float, float]] = []
+  for point in list(getattr(outer_curve, "Points", []) or []):
+    coords = _safe_point_coords(point, 2)
+    if coords is None:
+      continue
+    points.append((_safe_float(coords[0]), _safe_float(coords[1])))
+
+  if not points:
+    return None
+
+  xs = [point[0] for point in points]
+  ys = [point[1] for point in points]
+  return ((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0)
+
+
+def _unwrap_representation_item(item: Any) -> Any | None:
+  current = item
+  while current is not None and hasattr(current, "is_a") and current.is_a("IfcBooleanClippingResult"):
+    current = getattr(current, "FirstOperand", None)
+  return current
+
+
+def _read_space_geometric_anchor_world(space: Any) -> Point3D | None:
+  if space is None or not hasattr(space, "is_a") or not space.is_a("IfcSpace"):
+    return None
+
+  representation = getattr(space, "Representation", None)
+  reps = list(getattr(representation, "Representations", []) or [])
+  body_rep = None
+  for rep in reps:
+    identifier = str(getattr(rep, "RepresentationIdentifier", "") or "").strip().lower()
+    if identifier == "body":
+      body_rep = rep
+      break
+  if body_rep is None and reps:
+    body_rep = reps[0]
+  if body_rep is None:
+    return None
+
+  for raw_item in list(getattr(body_rep, "Items", []) or []):
+    item = _unwrap_representation_item(raw_item)
+    if item is None or not hasattr(item, "is_a") or not item.is_a("IfcExtrudedAreaSolid"):
+      continue
+
+    anchor_xy = _read_profile_anchor_xy(getattr(item, "SweptArea", None))
+    if anchor_xy is None:
+      continue
+
+    local_anchor = Point3D(x=anchor_xy[0], y=anchor_xy[1], z=0.0)
+    item_matrix = _axis2placement3d_to_matrix(getattr(item, "Position", None))
+    if item_matrix is not None:
+      local_anchor = _transform_point_by_matrix(local_anchor, item_matrix)
+
+    placement = getattr(space, "ObjectPlacement", None)
+    if placement is None:
+      return local_anchor
+    try:
+      placement_matrix = ifcopenshell.util.placement.get_local_placement(placement)
+    except Exception:
+      return local_anchor
+    return _transform_point_by_matrix(local_anchor, placement_matrix)
+
+  return None
+
+
+def _get_world_geom_settings() -> Any | None:
+  global _WORLD_GEOM_SETTINGS
+  if ifcopenshell_geom is None:
+    return None
+  if _WORLD_GEOM_SETTINGS is not None:
+    return _WORLD_GEOM_SETTINGS
+
+  try:
+    settings = ifcopenshell_geom.settings()
+  except Exception:
+    return None
+
+  for key in (
+    "use-world-coords",
+    getattr(settings, "USE_WORLD_COORDS", None),
+  ):
+    if key is None:
+      continue
+    try:
+      settings.set(key, True)
+      break
+    except Exception:
+      continue
+
+  _WORLD_GEOM_SETTINGS = settings
+  return settings
+
+
+def _read_product_geometric_anchor_world(product: Any) -> Point3D | None:
+  settings = _get_world_geom_settings()
+  if settings is None or ifcopenshell_geom is None:
+    return None
+
+  try:
+    shape = ifcopenshell_geom.create_shape(settings, product)
+  except Exception:
+    return None
+
+  geometry = getattr(shape, "geometry", None)
+  verts = getattr(geometry, "verts", None)
+  if verts is None:
+    return None
+
+  try:
+    values = [_safe_float(value) for value in verts]
+  except Exception:
+    return None
+
+  if len(values) < 3:
+    return None
+
+  xs = values[0::3]
+  ys = values[1::3]
+  zs = values[2::3]
+  if not xs or not ys or not zs:
+    return None
+
+  return Point3D(
+    x=(min(xs) + max(xs)) / 2.0,
+    y=(min(ys) + max(ys)) / 2.0,
+    z=min(zs),
+  )
+
+
 def _resolve_furniture_ifc_world_position(
   item: FurnitureItem,
   viewer_to_model_units: float,
@@ -442,7 +718,11 @@ def _resolve_furniture_ifc_world_position(
     and hasattr(container, "is_a")
     and container.is_a("IfcSpace")
   ):
-    container_world = _read_product_world_position(container)
+    container_world = (
+      _read_space_geometric_anchor_world(container)
+      or _read_product_geometric_anchor_world(container)
+      or _read_product_world_position(container)
+    )
     if container_world is not None:
       dx = _safe_float(relative_position.x) * viewer_to_model_units
       dy = _safe_float(relative_position.y) * viewer_to_model_units
@@ -872,9 +1152,7 @@ def _add_furniture_as_proxy(
 
   container = _resolve_furniture_container(model, item, warnings)
   owner_history = _first_owner_history(model)
-  ref = _build_ref_direction(item.rotation)
-  axis = model.createIfcDirection((0.0, 0.0, 1.0))
-  ref_direction = model.createIfcDirection(ref)
+  axis_values, ref_values = _build_furniture_axis_basis(item.rotation)
   world_position = _resolve_furniture_ifc_world_position(item, viewer_to_model_units, container)
   placement_rel_to = None
   placement_position = world_position
@@ -882,6 +1160,26 @@ def _add_furniture_as_proxy(
   if container_placement is not None and getattr(container_placement, "is_a", lambda *_: False)("IfcLocalPlacement"):
     placement_rel_to = container_placement
     placement_position = _world_point_to_local_relative(container_placement, world_position)
+    axis_values = _normalize_direction(
+      _world_vector_to_local_relative(container_placement, axis_values),
+      axis_values,
+    )
+    ref_values = _normalize_direction(
+      _world_vector_to_local_relative(container_placement, ref_values),
+      ref_values,
+    )
+    ref_proj = _dot3(ref_values, axis_values)
+    ref_values = _normalize_direction(
+      (
+        ref_values[0] - axis_values[0] * ref_proj,
+        ref_values[1] - axis_values[1] * ref_proj,
+        ref_values[2] - axis_values[2] * ref_proj,
+      ),
+      (1.0, 0.0, 0.0),
+    )
+
+  axis = model.createIfcDirection(axis_values)
+  ref_direction = model.createIfcDirection(ref_values)
 
   placement = _create_absolute_local_placement(
     model,

@@ -12,23 +12,32 @@
 
 .app__toolbar {
   display: flex;
-  flex-direction: row;
-  align-items: flex-start;
-  gap: 1.5rem;
+  flex-direction: column;
+  gap: 0.75rem;
   padding: 0.75rem 1rem;
   border: 1px solid #e2e8f0;
   border-radius: 0.75rem;
   background: #ffffff;
 }
 
-.app__intro h1 {
-  margin: 0 0 0.1rem;
-  font-size: 1.75rem;
+.app__toolbar-main {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  min-width: 0;
 }
 
-.app__intro p {
+.app__title {
   margin: 0;
-  color: #475569;
+  font-size: 1.75rem;
+  line-height: 1;
+  flex: 0 0 auto;
+}
+
+.app__status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
 }
 
 .file-input {
@@ -42,7 +51,8 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
-  align-items: flex-start;
+  align-items: center;
+  min-width: 0;
 }
 
 .file-input__button {
@@ -57,7 +67,9 @@
   font-size: 0.9rem;
   cursor: pointer;
   border: 1px solid #0f172a;
+  white-space: nowrap;
 }
+
 .file-input__button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
@@ -65,7 +77,7 @@
 
 .file-input__button--secondary {
   background: #fff;
-  color: #1e293b;
+  color: #475569;
   border-color: #cbd5e1;
 }
 
@@ -92,6 +104,26 @@
   padding: 0.35rem;
 }
 
+.file-input__menu-action {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  margin-bottom: 0.35rem;
+  padding: 0.5rem 0.55rem;
+  border: 1px dashed #cbd5e1;
+  border-radius: 0.5rem;
+  background: #f8fafc;
+  color: #0f172a;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.file-input__menu-action:hover {
+  border-color: #94a3b8;
+  background: #f1f5f9;
+}
+
 .file-input__menu-empty {
   margin: 0;
   padding: 0.45rem 0.5rem;
@@ -100,16 +132,13 @@
 }
 
 .file-input__menu-item {
-  width: 100%;
   display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-  text-align: left;
+  align-items: stretch;
+  gap: 0.35rem;
   background: transparent;
   border: 1px solid transparent;
   border-radius: 0.45rem;
-  padding: 0.45rem 0.5rem;
-  cursor: pointer;
+  padding: 0.2rem;
 }
 
 .file-input__menu-item:hover {
@@ -120,6 +149,45 @@
 .file-input__menu-item--active {
   background: #eef2ff;
   border-color: #c7d2fe;
+}
+
+.file-input__menu-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 0.35rem;
+  padding: 0.25rem 0.3rem;
+  cursor: pointer;
+}
+
+.file-input__menu-delete {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  margin: auto 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.45rem;
+  background: #fff;
+  color: #7f1d1d;
+  cursor: pointer;
+}
+
+.file-input__menu-delete:hover {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.file-input__menu-delete svg {
+  width: 0.95rem;
+  height: 0.95rem;
 }
 
 .file-input__menu-item-name {
@@ -139,7 +207,6 @@
   margin: 0;
   font-size: 0.82rem;
   color: #64748b;
-  max-width: 240px;
   word-break: break-word;
 }
 
@@ -153,8 +220,12 @@
 }
 
 @media (max-width: 960px) {
-  .app__toolbar {
+  .app__toolbar-main {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .app__status {
+    flex-direction: column;
   }
 }

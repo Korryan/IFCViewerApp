@@ -17,6 +17,21 @@ export type IfcExportStateResponse = {
   warnings: string[]
 }
 
+export type AppliedModelInfo = {
+  modelId: string
+  fileName: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type IfcApplyStateResponse = {
+  model: AppliedModelInfo
+  appliedMetadata: number
+  appliedFurniture: number
+  appliedHistory: number
+  warnings: string[]
+}
+
 export type IfcExportStateRequest = {
   metadata?: MetadataEntry[]
   furniture?: FurnitureItem[]
@@ -66,4 +81,11 @@ export const exportIfcState = async (
   payload?: IfcExportStateRequest
 ): Promise<IfcExportStateResponse> => {
   return postJson<IfcExportStateResponse>(`${modelApiBase}/ifc/export-state`, payload)
+}
+
+export const applyIfcState = async (
+  modelApiBase: string,
+  payload?: IfcExportStateRequest
+): Promise<IfcApplyStateResponse> => {
+  return postJson<IfcApplyStateResponse>(`${modelApiBase}/ifc/apply-state`, payload)
 }

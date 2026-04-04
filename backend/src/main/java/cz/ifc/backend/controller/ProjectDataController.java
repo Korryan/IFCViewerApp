@@ -19,6 +19,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -47,6 +48,14 @@ public class ProjectDataController {
     return storageService.listModels(projectId);
   }
 
+  @DeleteMapping("/models/{modelId}")
+  public ResponseEntity<Void> deleteModel(
+      @PathVariable String projectId,
+      @PathVariable String modelId) {
+    storageService.deleteModel(projectId, modelId);
+    return ResponseEntity.noContent().build();
+  }
+
   @PostMapping(path = "/models", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
   public FileStorageService.StoredModelInfo uploadModel(
       @PathVariable String projectId,
@@ -71,6 +80,26 @@ public class ProjectDataController {
     return stored;
   }
 
+  @GetMapping("/prefabs")
+  public List<FileStorageService.StoredPrefabInfo> listPrefabs(@PathVariable String projectId) {
+    return storageService.listPrefabs(projectId);
+  }
+
+  @PostMapping(path = "/prefabs", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+  public FileStorageService.StoredPrefabInfo uploadPrefab(
+      @PathVariable String projectId,
+      @RequestParam("file") MultipartFile file) {
+    return storageService.storeUploadedPrefab(projectId, file);
+  }
+
+  @DeleteMapping("/prefabs/{prefabId}")
+  public ResponseEntity<Void> deletePrefab(
+      @PathVariable String projectId,
+      @PathVariable String prefabId) {
+    storageService.deletePrefab(projectId, prefabId);
+    return ResponseEntity.noContent().build();
+  }
+
   @GetMapping(path = "/models/{modelId}/ifc", produces = MediaType.APPLICATION_OCTET_STREAM_VALUE)
   public ResponseEntity<Resource> downloadIfcModel(
       @PathVariable String projectId,
@@ -81,6 +110,20 @@ public class ProjectDataController {
         .header(
             HttpHeaders.CONTENT_DISPOSITION,
             ContentDisposition.attachment().filename(modelInfo.fileName()).build().toString())
+        .contentType(MediaType.APPLICATION_OCTET_STREAM)
+        .body(resource);
+  }
+
+  @GetMapping(path = "/prefabs/{prefabId}/ifc", produces = MediaType.APPLICATION_OCTET_STREAM_VALUE)
+  public ResponseEntity<Resource> downloadIfcPrefab(
+      @PathVariable String projectId,
+      @PathVariable String prefabId) {
+    FileStorageService.StoredPrefabInfo prefabInfo = storageService.getPrefabInfo(projectId, prefabId);
+    Resource resource = new FileSystemResource(storageService.getPrefabIfcPath(projectId, prefabId));
+    return ResponseEntity.ok()
+        .header(
+            HttpHeaders.CONTENT_DISPOSITION,
+            ContentDisposition.attachment().filename(prefabInfo.fileName()).build().toString())
         .contentType(MediaType.APPLICATION_OCTET_STREAM)
         .body(resource);
   }
@@ -146,6 +189,47 @@ public class ProjectDataController {
         exported.exportedFurnitureCount(),
         exported.exportedHistoryCount(),
         safeList(exported.warnings()));
+  }
+
+  @PostMapping("/models/{modelId}/ifc/apply-state")
+  public IfcApplyStateResponse applyIfcState(
+      @PathVariable String projectId,
+      @PathVariable String modelId,
+      @RequestBody(required = false) IfcExportStateRequest request) {
+    Path sourceIfcPath = storageService.getModelIfcPath(projectId, modelId);
+    Path targetIfcPath = storageService.createModelExportIfcPath(projectId, modelId, "ifc-apply");
+
+    List<MetadataEntry> metadata =
+        request != null && request.metadata() != null
+            ? safeList(request.metadata())
+            : storageService.readMetadata(projectId, modelId);
+    List<FurnitureItem> furniture =
+        request != null && request.furniture() != null
+            ? safeList(request.furniture())
+            : storageService.readFurniture(projectId, modelId);
+    List<HistoryEntry> history =
+        request != null && request.history() != null
+            ? safeList(request.history())
+            : storageService.readHistory(projectId, modelId);
+
+    try {
+      IfcOpenShellClient.ExportStateResponse exported =
+          ifcOpenShellClient.exportState(sourceIfcPath, targetIfcPath, metadata, furniture, history);
+
+      storageService.replaceModelIfc(projectId, modelId, targetIfcPath);
+      storageService.resetModelState(projectId, modelId);
+      FileStorageService.StoredModelInfo updatedModel =
+          storageService.getModelInfo(projectId, modelId);
+
+      return new IfcApplyStateResponse(
+          updatedModel,
+          exported.exportedMetadataCount(),
+          exported.exportedFurnitureCount(),
+          exported.exportedHistoryCount(),
+          safeList(exported.warnings()));
+    } finally {
+      storageService.deleteIfExists(targetIfcPath);
+    }
   }
 
   @GetMapping(path = "/models/{modelId}/ifc/exports/{fileName:.+}", produces = MediaType.APPLICATION_OCTET_STREAM_VALUE)
@@ -290,5 +374,12 @@ public class ProjectDataController {
       int exportedMetadata,
       int exportedFurniture,
       int exportedHistory,
+      List<String> warnings) {}
+
+  public record IfcApplyStateResponse(
+      FileStorageService.StoredModelInfo model,
+      int appliedMetadata,
+      int appliedFurniture,
+      int appliedHistory,
       List<String> warnings) {}
 }

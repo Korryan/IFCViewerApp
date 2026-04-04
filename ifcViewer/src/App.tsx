@@ -5,7 +5,7 @@ import {
   type HistoryEntry,
   type MetadataEntry
 } from 'ifc-viewer-component'
-import { exportIfcState } from './api/ifcOpenShellApi'
+import { applyIfcState, exportIfcState } from './api/ifcOpenShellApi'
 import './App.css'
 
 type StoredModelInfo = {
@@ -15,10 +15,27 @@ type StoredModelInfo = {
   updatedAt: string
 }
 
+type StoredPrefabInfo = {
+  prefabId: string
+  fileName: string
+  createdAt: string
+  updatedAt: string
+}
+
+const TrashIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path
+      fill="currentColor"
+      d="M9 3h6l1 2h4v2H4V5h4l1-2Zm1 6h2v8h-2V9Zm4 0h2v8h-2V9ZM7 9h2v8H7V9Zm-1 12a2 2 0 0 1-2-2V8h16v11a2 2 0 0 1-2 2H6Z"
+    />
+  </svg>
+)
+
 function App() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [activeModel, setActiveModel] = useState<StoredModelInfo | null>(null)
   const [savedModels, setSavedModels] = useState<StoredModelInfo[]>([])
+  const [savedPrefabs, setSavedPrefabs] = useState<StoredPrefabInfo[]>([])
   const [metadata, setMetadata] = useState<MetadataEntry[] | undefined>(undefined)
   const [furniture, setFurniture] = useState<FurnitureItem[] | undefined>(undefined)
   const [history, setHistory] = useState<HistoryEntry[] | undefined>(undefined)
@@ -26,16 +43,21 @@ function App() {
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [isSavedModelsMenuOpen, setIsSavedModelsMenuOpen] = useState(false)
+  const [isPrefabsMenuOpen, setIsPrefabsMenuOpen] = useState(false)
   const [isExportingIfcState, setIsExportingIfcState] = useState(false)
+  const [isApplyingIfcState, setIsApplyingIfcState] = useState(false)
   const requestTokenRef = useRef(0)
   const savedModelsMenuRef = useRef<HTMLDivElement | null>(null)
+  const prefabsMenuRef = useRef<HTMLDivElement | null>(null)
 
   const projectApiBase = import.meta.env.VITE_API_BASE ?? 'http://localhost:8080/projects/1'
   const activeModelApiBase = activeModel
     ? `${projectApiBase}/models/${encodeURIComponent(activeModel.modelId)}`
     : null
   const activeModelUrl =
-    activeModel ? `${projectApiBase}/models/${encodeURIComponent(activeModel.modelId)}/ifc` : undefined
+    activeModel
+      ? `${projectApiBase}/models/${encodeURIComponent(activeModel.modelId)}/ifc?updatedAt=${encodeURIComponent(activeModel.updatedAt ?? '')}`
+      : undefined
 
   const fetchJson = useCallback(async <T,>(url: string, options?: RequestInit): Promise<T> => {
     const response = await fetch(url, options)
@@ -45,11 +67,28 @@ function App() {
     return response.json() as Promise<T>
   }, [])
 
+  const fetchOk = useCallback(async (url: string, options?: RequestInit): Promise<void> => {
+    const response = await fetch(url, options)
+    if (!response.ok) {
+      throw new Error(`Request failed: ${response.status}`)
+    }
+  }, [])
+
   const formatTimestamp = useCallback((value?: string | null) => {
     if (!value) return ''
     const parsed = new Date(value)
     if (Number.isNaN(parsed.getTime())) return value
     return parsed.toLocaleString()
+  }, [])
+
+  const resetActiveModelState = useCallback(() => {
+    requestTokenRef.current += 1
+    setActiveModel(null)
+    setSelectedFile(null)
+    setMetadata([])
+    setFurniture([])
+    setHistory([])
+    setIsHydrated(false)
   }, [])
 
   const loadModelData = useCallback(
@@ -95,6 +134,61 @@ function App() {
     return normalized
   }, [fetchJson, projectApiBase])
 
+  const refreshSavedPrefabs = useCallback(async (): Promise<StoredPrefabInfo[]> => {
+    const prefabs = await fetchJson<StoredPrefabInfo[]>(`${projectApiBase}/prefabs`)
+    const normalized = Array.isArray(prefabs) ? prefabs : []
+    setSavedPrefabs(normalized)
+    return normalized
+  }, [fetchJson, projectApiBase])
+
+  const ensureDefaultCubePrefab = useCallback(
+    async (prefabs: StoredPrefabInfo[]): Promise<StoredPrefabInfo[]> => {
+      const hasCubePrefab = prefabs.some((item) => item.fileName.trim().toLowerCase() === 'cube.ifc')
+      if (hasCubePrefab) {
+        return prefabs
+      }
+
+      try {
+        const response = await fetch('/prefabs/cube.ifc')
+        if (!response.ok) {
+          return prefabs
+        }
+        const blob = await response.blob()
+        const formData = new FormData()
+        formData.append('file', blob, 'cube.ifc')
+        const uploadedPrefab = await fetchJson<StoredPrefabInfo>(`${projectApiBase}/prefabs`, {
+          method: 'POST',
+          body: formData
+        })
+        const nextPrefabs = [
+          uploadedPrefab,
+          ...prefabs.filter((item) => item.prefabId !== uploadedPrefab.prefabId)
+        ]
+        setSavedPrefabs(nextPrefabs)
+        return nextPrefabs
+      } catch (err) {
+        console.warn('Failed to seed default cube prefab', err)
+        return prefabs
+      }
+    },
+    [fetchJson, projectApiBase]
+  )
+
+  const resolvePrefabFile = useCallback(
+    async (prefabId: string): Promise<File | null> => {
+      const prefabInfo = savedPrefabs.find((item) => item.prefabId === prefabId)
+      const response = await fetch(`${projectApiBase}/prefabs/${encodeURIComponent(prefabId)}/ifc`)
+      if (!response.ok) {
+        throw new Error(`Failed to load prefab ${prefabId}: ${response.status}`)
+      }
+      const blob = await response.blob()
+      return new File([blob], prefabInfo?.fileName ?? `${prefabId}.ifc`, {
+        type: blob.type || 'application/octet-stream'
+      })
+    },
+    [projectApiBase, savedPrefabs]
+  )
+
   const handleSelectSavedModel = useCallback(
     async (modelInfo: StoredModelInfo) => {
       setIsSavedModelsMenuOpen(false)
@@ -104,6 +198,67 @@ function App() {
       })
     },
     [loadModelData]
+  )
+
+  const handleDeleteSavedModel = useCallback(
+    async (modelInfo: StoredModelInfo) => {
+      const confirmed = window.confirm(`Delete saved model "${modelInfo.fileName}"?`)
+      if (!confirmed) return
+
+      try {
+        await fetchOk(`${projectApiBase}/models/${encodeURIComponent(modelInfo.modelId)}`, {
+          method: 'DELETE'
+        })
+        const nextModels = await refreshSavedModels()
+        if (activeModel?.modelId === modelInfo.modelId) {
+          resetActiveModelState()
+          setStatusMessage(`Deleted saved model ${modelInfo.fileName}.`)
+        } else {
+          setStatusMessage(`Deleted saved model ${modelInfo.fileName}.`)
+        }
+        if (nextModels.length === 0) {
+          setIsSavedModelsMenuOpen(false)
+        }
+      } catch (err) {
+        console.error('Failed to delete saved model', err)
+        setErrorMessage('Failed to delete saved model.')
+      }
+    },
+    [activeModel?.modelId, fetchOk, projectApiBase, refreshSavedModels, resetActiveModelState]
+  )
+
+  const handleDownloadPrefab = useCallback(
+    (prefab: StoredPrefabInfo) => {
+      const link = document.createElement('a')
+      link.href = `${projectApiBase}/prefabs/${encodeURIComponent(prefab.prefabId)}/ifc`
+      link.download = prefab.fileName
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+    },
+    [projectApiBase]
+  )
+
+  const handleDeletePrefab = useCallback(
+    async (prefab: StoredPrefabInfo) => {
+      const confirmed = window.confirm(`Delete prefab "${prefab.fileName}"?`)
+      if (!confirmed) return
+
+      try {
+        await fetchOk(`${projectApiBase}/prefabs/${encodeURIComponent(prefab.prefabId)}`, {
+          method: 'DELETE'
+        })
+        const nextPrefabs = await refreshSavedPrefabs()
+        setStatusMessage(`Deleted prefab ${prefab.fileName}.`)
+        if (nextPrefabs.length === 0) {
+          setIsPrefabsMenuOpen(false)
+        }
+      } catch (err) {
+        console.error('Failed to delete prefab', err)
+        setErrorMessage('Failed to delete prefab.')
+      }
+    },
+    [fetchOk, projectApiBase, refreshSavedPrefabs]
   )
 
   const handleFileChange = useCallback(
@@ -145,6 +300,37 @@ function App() {
     [fetchJson, loadModelData, projectApiBase]
   )
 
+  const handlePrefabUpload = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0] ?? null
+      event.currentTarget.value = ''
+      if (!file) return
+
+      setErrorMessage(null)
+      setStatusMessage(`Uploading prefab ${file.name}...`)
+
+      try {
+        const formData = new FormData()
+        formData.append('file', file)
+        const uploadedPrefab = await fetchJson<StoredPrefabInfo>(`${projectApiBase}/prefabs`, {
+          method: 'POST',
+          body: formData
+        })
+        setSavedPrefabs((prev) => [
+          uploadedPrefab,
+          ...prev.filter((item) => item.prefabId !== uploadedPrefab.prefabId)
+        ])
+        setIsPrefabsMenuOpen(true)
+        setStatusMessage(`Uploaded prefab ${uploadedPrefab.fileName}.`)
+      } catch (err) {
+        console.error('Failed to upload prefab IFC file', err)
+        setStatusMessage(null)
+        setErrorMessage('Failed to upload prefab IFC file to backend storage.')
+      }
+    },
+    [fetchJson, projectApiBase]
+  )
+
   const handleExportIfcState = useCallback(async () => {
     if (!activeModel || !activeModelApiBase) return
     setErrorMessage(null)
@@ -178,33 +364,65 @@ function App() {
     }
   }, [activeModel, activeModelApiBase, furniture, history, metadata])
 
+  const handleApplyIfcState = useCallback(async () => {
+    if (!activeModel || !activeModelApiBase) return
+    const confirmed = window.confirm(
+      `Apply all saved changes into "${activeModel.fileName}" and clear pending saved changes?`
+    )
+    if (!confirmed) return
+
+    setErrorMessage(null)
+    setStatusMessage(`Applying changes into ${activeModel.fileName}...`)
+    setIsApplyingIfcState(true)
+    try {
+      const result = await applyIfcState(activeModelApiBase, {
+        metadata: metadata ?? [],
+        furniture: furniture ?? [],
+        history: history ?? []
+      })
+
+      setSavedModels((prev) => [
+        result.model,
+        ...prev.filter((item) => item.modelId !== result.model.modelId)
+      ])
+
+      await loadModelData(result.model, {
+        localFile: null,
+        status: `Reloading ${result.model.fileName}...`
+      })
+
+      const warningSuffix = result.warnings.length > 0 ? ` (${result.warnings.length} warnings)` : ''
+      setStatusMessage(
+        `Applied changes into saved IFC: ${result.appliedMetadata} metadata, ` +
+          `${result.appliedFurniture} furniture, ${result.appliedHistory} history${warningSuffix}.`
+      )
+    } catch (err) {
+      console.error('IfcOpenShell apply-state failed', err)
+      setStatusMessage(null)
+      setErrorMessage('Applying changes into the saved IFC failed. Check backend and ifc-ops logs.')
+    } finally {
+      setIsApplyingIfcState(false)
+    }
+  }, [activeModel, activeModelApiBase, furniture, history, loadModelData, metadata])
+
   useEffect(() => {
     const token = ++requestTokenRef.current
     const bootstrap = async () => {
       setErrorMessage(null)
-      setStatusMessage('Loading saved models...')
+      setStatusMessage('Loading saved assets...')
       try {
-        await refreshSavedModels()
+        const [, prefabs] = await Promise.all([refreshSavedModels(), refreshSavedPrefabs()])
+        await ensureDefaultCubePrefab(prefabs)
         if (requestTokenRef.current !== token) return
 
-        setActiveModel(null)
-        setSelectedFile(null)
-        setMetadata([])
-        setFurniture([])
-        setHistory([])
-        setIsHydrated(false)
+        resetActiveModelState()
         setStatusMessage(null)
       } catch (err) {
         if (requestTokenRef.current !== token) return
-        console.error('Failed to load saved models', err)
-        setActiveModel(null)
-        setSelectedFile(null)
-        setMetadata([])
-        setFurniture([])
-        setHistory([])
-        setIsHydrated(false)
+        console.error('Failed to load saved assets', err)
+        resetActiveModelState()
         setStatusMessage(null)
-        setErrorMessage('Failed to load saved models from backend.')
+        setErrorMessage('Failed to load saved models or prefabs from backend.')
       }
     }
 
@@ -212,23 +430,25 @@ function App() {
     return () => {
       requestTokenRef.current += 1
     }
-  }, [refreshSavedModels])
+  }, [ensureDefaultCubePrefab, refreshSavedModels, refreshSavedPrefabs, resetActiveModelState])
 
   useEffect(() => {
-    if (!isSavedModelsMenuOpen) return
+    if (!isSavedModelsMenuOpen && !isPrefabsMenuOpen) return
 
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target as Node | null
       if (!target) return
       if (savedModelsMenuRef.current?.contains(target)) return
+      if (prefabsMenuRef.current?.contains(target)) return
       setIsSavedModelsMenuOpen(false)
+      setIsPrefabsMenuOpen(false)
     }
 
     window.addEventListener('pointerdown', handlePointerDown)
     return () => {
       window.removeEventListener('pointerdown', handlePointerDown)
     }
-  }, [isSavedModelsMenuOpen])
+  }, [isPrefabsMenuOpen, isSavedModelsMenuOpen])
 
   useEffect(() => {
     if (!isHydrated || !activeModelApiBase || !metadata) return
@@ -269,11 +489,32 @@ function App() {
   return (
     <div className="app">
       <header className="app__toolbar">
-        <div className="file-input">
+        <div className="app__toolbar-main">
+          <h1 className="app__title">IFCViewer</h1>
           <div className="file-input__actions">
             <label htmlFor="ifc-file" className="file-input__button">
-              Choose IFC file
+              Upload file
             </label>
+            <button
+              type="button"
+              className="file-input__button file-input__button--secondary"
+              onClick={() => {
+                void handleExportIfcState()
+              }}
+              disabled={!activeModelApiBase || isExportingIfcState || isApplyingIfcState}
+            >
+              {isExportingIfcState ? 'Exporting...' : 'Export file'}
+            </button>
+            <button
+              type="button"
+              className="file-input__button file-input__button--secondary"
+              onClick={() => {
+                void handleApplyIfcState()
+              }}
+              disabled={!activeModelApiBase || isExportingIfcState || isApplyingIfcState}
+            >
+              {isApplyingIfcState ? 'Applying...' : 'Apply changes'}
+            </button>
             <div className="file-input__menu-wrap" ref={savedModelsMenuRef}>
               <button
                 type="button"
@@ -281,6 +522,7 @@ function App() {
                 onClick={() => {
                   const nextOpen = !isSavedModelsMenuOpen
                   setIsSavedModelsMenuOpen(nextOpen)
+                  setIsPrefabsMenuOpen(false)
                   if (nextOpen) {
                     void refreshSavedModels().catch((err) => {
                       console.error('Failed to refresh saved models list', err)
@@ -298,52 +540,127 @@ function App() {
                     <p className="file-input__menu-empty">No saved models yet.</p>
                   ) : (
                     savedModels.map((model) => (
-                      <button
+                      <div
                         key={model.modelId}
-                        type="button"
-                        role="menuitem"
                         className={[
                           'file-input__menu-item',
                           activeModel?.modelId === model.modelId ? 'file-input__menu-item--active' : ''
                         ]
                           .filter(Boolean)
                           .join(' ')}
-                        onClick={() => {
-                          void handleSelectSavedModel(model)
-                        }}
-                        title={`${model.fileName} (${model.modelId})`}
                       >
-                        <span className="file-input__menu-item-name">{model.fileName}</span>
-                        <span className="file-input__menu-item-meta">
-                          {model.modelId}
-                          {model.updatedAt ? ` | ${formatTimestamp(model.updatedAt)}` : ''}
-                        </span>
-                      </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="file-input__menu-main"
+                          onClick={() => {
+                            void handleSelectSavedModel(model)
+                          }}
+                          title={`${model.fileName} (${model.modelId})`}
+                        >
+                          <span className="file-input__menu-item-name">{model.fileName}</span>
+                          <span className="file-input__menu-item-meta">
+                            {model.modelId}
+                            {model.updatedAt ? ` | ${formatTimestamp(model.updatedAt)}` : ''}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          className="file-input__menu-delete"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            void handleDeleteSavedModel(model)
+                          }}
+                          aria-label={`Delete saved model ${model.fileName}`}
+                          title="Delete saved model"
+                        >
+                          <TrashIcon />
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="file-input__menu-wrap" ref={prefabsMenuRef}>
+              <button
+                type="button"
+                className="file-input__button file-input__button--secondary"
+                onClick={() => {
+                  const nextOpen = !isPrefabsMenuOpen
+                  setIsPrefabsMenuOpen(nextOpen)
+                  setIsSavedModelsMenuOpen(false)
+                  if (nextOpen) {
+                    void refreshSavedPrefabs().catch((err) => {
+                      console.error('Failed to refresh prefab list', err)
+                    })
+                  }
+                }}
+                aria-haspopup="menu"
+                aria-expanded={isPrefabsMenuOpen}
+              >
+                Upload prefab
+              </button>
+              {isPrefabsMenuOpen && (
+                <div className="file-input__menu" role="menu" aria-label="Prefabs">
+                  <label htmlFor="prefab-file" className="file-input__menu-action">
+                    Upload new prefab
+                  </label>
+                  {savedPrefabs.length === 0 ? (
+                    <p className="file-input__menu-empty">No prefabs saved yet.</p>
+                  ) : (
+                    savedPrefabs.map((prefab) => (
+                      <div key={prefab.prefabId} className="file-input__menu-item">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="file-input__menu-main"
+                          onClick={() => {
+                            handleDownloadPrefab(prefab)
+                          }}
+                          title={`${prefab.fileName} (${prefab.prefabId})`}
+                        >
+                          <span className="file-input__menu-item-name">{prefab.fileName}</span>
+                          <span className="file-input__menu-item-meta">
+                            {prefab.prefabId}
+                            {prefab.updatedAt ? ` | ${formatTimestamp(prefab.updatedAt)}` : ''}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          className="file-input__menu-delete"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            void handleDeletePrefab(prefab)
+                          }}
+                          aria-label={`Delete prefab ${prefab.fileName}`}
+                          title="Delete prefab"
+                        >
+                          <TrashIcon />
+                        </button>
+                      </div>
                     ))
                   )}
                 </div>
               )}
             </div>
           </div>
-          <div className="file-input__actions">
-            <button
-              type="button"
-              className="file-input__button file-input__button--secondary"
-              onClick={() => {
-                void handleExportIfcState()
-              }}
-              disabled={!activeModelApiBase || isExportingIfcState}
-            >
-              {isExportingIfcState ? 'Exporting...' : 'Export IFC (IfcOpenShell)'}
-            </button>
-          </div>
-          <input
-            id="ifc-file"
-            className="file-input__native"
-            type="file"
-            accept=".ifc"
-            onChange={handleFileChange}
-          />
+        </div>
+        <input
+          id="ifc-file"
+          className="file-input__native"
+          type="file"
+          accept=".ifc"
+          onChange={handleFileChange}
+        />
+        <input
+          id="prefab-file"
+          className="file-input__native"
+          type="file"
+          accept=".ifc"
+          onChange={handlePrefabUpload}
+        />
+        <div className="app__status">
           <p className="file-input__info">
             {selectedFile
               ? `Loaded local file: ${selectedFile.name}`
@@ -357,13 +674,6 @@ function App() {
           {statusMessage && <p className="file-input__info">{statusMessage}</p>}
           {errorMessage && <p className="file-input__info">{errorMessage}</p>}
         </div>
-        <div className="app__intro">
-          <h1>IFC Viewer</h1>
-          <p>
-            Upload an .ifc file to store it in the backend together with metadata, furniture and
-            history JSON files.
-          </p>
-        </div>
       </header>
 
       <section className="viewer-shell">
@@ -373,9 +683,11 @@ function App() {
           metadata={metadata}
           furniture={furniture}
           history={history}
+          prefabs={savedPrefabs}
           onMetadataChange={setMetadata}
           onFurnitureChange={setFurniture}
           onHistoryChange={setHistory}
+          onResolvePrefabFile={resolvePrefabFile}
         />
       </section>
     </div>
