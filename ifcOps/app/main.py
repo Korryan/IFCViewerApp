@@ -29,7 +29,6 @@ DATA_ROOT = Path(os.getenv("IFC_OPS_DATA_ROOT", "/data")).resolve()
 ELEMENT_STATE_PSET = "Pset_Baka_State"
 FURNITURE_STATE_PSET = "Pset_Baka_Furniture"
 HISTORY_STATE_PSET = "Pset_Baka_History"
-STATE_VERSION = "baka-ifc-state-v1"
 PSET_PROP_KEY_PATTERN = re.compile(r"^pset-(\d+)-(\d+)$")
 EDITABLE_DIRECT_ATTRIBUTES = {"Name", "Description", "ObjectType", "Tag", "LongName"}
 ROOM_NUMBER_KEYS = {"roomnumber", "raumnummer", "number"}
@@ -113,10 +112,12 @@ class ExportStateResponse(BaseModel):
   warnings: list[str] = Field(default_factory=list)
 
 
+# Return the current UTC timestamp as an ISO string.
 def _now_iso() -> str:
   return datetime.now(UTC).isoformat()
 
 
+# Check whether a resolved path stays inside the configured data root.
 def _is_inside_data_root(path: Path) -> bool:
   try:
     path.resolve().relative_to(DATA_ROOT)
@@ -125,6 +126,7 @@ def _is_inside_data_root(path: Path) -> bool:
     return False
 
 
+# Resolve and validate an existing input file path inside the data root.
 def _resolve_existing_path(raw_path: str, field_name: str) -> Path:
   if not raw_path:
     raise ValueError(f"{field_name} is required")
@@ -139,6 +141,7 @@ def _resolve_existing_path(raw_path: str, field_name: str) -> Path:
   return resolved
 
 
+# Resolve and validate an IFC output path inside the data root.
 def _resolve_target_path(raw_path: str) -> Path:
   if not raw_path:
     raise ValueError("target_ifc_path is required")
@@ -154,6 +157,7 @@ def _resolve_target_path(raw_path: str) -> Path:
   return resolved
 
 
+# Fetch an IFC entity by numeric id without throwing on bad input.
 def _safe_by_id(model: Any, entity_id: Any) -> Any | None:
   try:
     if entity_id is None:
@@ -163,6 +167,7 @@ def _safe_by_id(model: Any, entity_id: Any) -> Any | None:
     return None
 
 
+# Parse a JSON object safely and collect warnings instead of failing hard.
 def _try_json_dict(raw: Any, warnings: list[str], field_name: str) -> dict[str, Any] | None:
   if raw is None:
     return None
@@ -182,36 +187,7 @@ def _try_json_dict(raw: Any, warnings: list[str], field_name: str) -> dict[str, 
   return parsed
 
 
-def _try_json_point(raw: Any, warnings: list[str], field_name: str) -> Point3D | None:
-  parsed = _try_json_dict(raw, warnings, field_name)
-  if not parsed:
-    return None
-  try:
-    return Point3D(x=float(parsed["x"]), y=float(parsed["y"]), z=float(parsed["z"]))
-  except (KeyError, TypeError, ValueError):
-    warnings.append(f"{field_name} JSON is not a valid point object")
-    return None
-
-
-def _try_json_list(raw: Any, warnings: list[str], field_name: str) -> list[Any]:
-  if raw is None:
-    return []
-  if isinstance(raw, list):
-    return raw
-  if isinstance(raw, str):
-    try:
-      parsed = json.loads(raw)
-    except json.JSONDecodeError:
-      warnings.append(f"{field_name} JSON decode failed")
-      return []
-    if isinstance(parsed, list):
-      return parsed
-    warnings.append(f"{field_name} JSON is not a list")
-    return []
-  warnings.append(f"{field_name} is not a list")
-  return []
-
-
+# Convert loose user or IFC values into a boolean when possible.
 def _coerce_bool(raw: Any) -> bool | None:
   if isinstance(raw, bool):
     return raw
@@ -226,6 +202,7 @@ def _coerce_bool(raw: Any) -> bool | None:
   return None
 
 
+# Read one property set from an IFC product as a plain dictionary.
 def _read_pset_values(product: Any, pset_name: str) -> dict[str, Any] | None:
   psets = ifcopenshell.util.element.get_psets(product)
   values = psets.get(pset_name)
@@ -234,6 +211,7 @@ def _read_pset_values(product: Any, pset_name: str) -> dict[str, Any] | None:
   return {key: value for key, value in values.items() if key != "id"}
 
 
+# Return an existing property set or create it when it is missing.
 def _get_or_create_pset(model: Any, product: Any, pset_name: str) -> Any:
   psets = ifcopenshell.util.element.get_psets(product)
   values = psets.get(pset_name)
@@ -246,6 +224,7 @@ def _get_or_create_pset(model: Any, product: Any, pset_name: str) -> Any:
   return ifcopenshell.api.run("pset.add_pset", model, product=product, name=pset_name)
 
 
+# Remove a named property set from an IFC entity if it exists.
 def _remove_named_pset(model: Any, entity: Any, pset_name: str) -> bool:
   psets = ifcopenshell.util.element.get_psets(entity)
   values = psets.get(pset_name)
@@ -277,6 +256,7 @@ def _remove_named_pset(model: Any, entity: Any, pset_name: str) -> bool:
   return removed
 
 
+# Delete technical editor PSETs before writing the final IFC.
 def _purge_editor_state_psets(model: Any) -> int:
   removed = 0
   for product in model.by_type("IfcProduct"):
@@ -293,6 +273,7 @@ def _purge_editor_state_psets(model: Any) -> int:
   return removed
 
 
+# Return the first IfcProject entity from the loaded model.
 def _first_ifc_project(model: Any) -> Any | None:
   projects = model.by_type("IfcProject")
   if not projects:
@@ -300,6 +281,7 @@ def _first_ifc_project(model: Any) -> Any | None:
   return projects[0]
 
 
+# Return editor state imported from IFC, which is currently an empty no-op response.
 def _import_state(request: ImportStateRequest) -> ImportStateResponse:
   source_path = _resolve_existing_path(request.source_ifc_path, "source_ifc_path")
   return ImportStateResponse(
@@ -310,15 +292,13 @@ def _import_state(request: ImportStateRequest) -> ImportStateResponse:
   )
 
 
-def _dump_json(value: Any) -> str:
-  return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-
-
+# Return the first available IfcOwnerHistory for newly created entities.
 def _first_owner_history(model: Any) -> Any | None:
   owners = model.by_type("IfcOwnerHistory")
   return owners[0] if owners else None
 
 
+# Convert a value to a finite float and fall back to a default on invalid input.
 def _safe_float(value: Any, default: float = 0.0) -> float:
   try:
     parsed = float(value)
@@ -329,6 +309,7 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
   return default
 
 
+# Return how many meters correspond to one model unit in the IFC file.
 def _meters_per_model_unit(model: Any) -> float:
   try:
     scale = float(ifcopenshell.util.unit.calculate_unit_scale(model))
@@ -339,6 +320,7 @@ def _meters_per_model_unit(model: Any) -> float:
   return 1.0
 
 
+# Normalize a dimension value and fall back to a safe positive default.
 def _safe_dim(value: Any, default: float = 1.0) -> float:
   parsed = abs(_safe_float(value, default))
   if parsed <= 1e-6:
@@ -346,6 +328,7 @@ def _safe_dim(value: Any, default: float = 1.0) -> float:
   return parsed
 
 
+# Build IFC placement axes for a furniture item from its viewer rotation.
 def _build_furniture_axis_basis(
   rotation: Point3D | None,
 ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
@@ -371,6 +354,7 @@ def _build_furniture_axis_basis(
   return (axis, ref)
 
 
+# Create a new IfcLocalPlacement from an absolute point and optional axes.
 def _create_absolute_local_placement(
   model: Any,
   position: Point3D,
@@ -389,6 +373,7 @@ def _create_absolute_local_placement(
   return model.createIfcLocalPlacement(placement_rel_to, relative)
 
 
+# Convert a world-space point into coordinates relative to a parent placement.
 def _world_point_to_local_relative(parent_placement: Any, point: Point3D) -> Point3D:
   try:
     matrix = ifcopenshell.util.placement.get_local_placement(parent_placement)
@@ -411,6 +396,7 @@ def _world_point_to_local_relative(parent_placement: Any, point: Point3D) -> Poi
     return point
 
 
+# Read the rotation matrix encoded in an IFC local placement.
 def _placement_rotation_matrix(placement: Any) -> list[list[float]] | None:
   if placement is None:
     return None
@@ -430,6 +416,7 @@ def _placement_rotation_matrix(placement: Any) -> list[list[float]] | None:
     return None
 
 
+# Convert a world-space direction vector into a parent placement frame.
 def _world_vector_to_local_relative(
   parent_placement: Any,
   vector: tuple[float, float, float],
@@ -445,6 +432,7 @@ def _world_vector_to_local_relative(
   )
 
 
+# Convert a viewer position into IFC world axes and model units.
 def _viewer_point_to_ifc_world(position: Point3D, viewer_to_model_units: float = 1.0) -> Point3D:
   x = _safe_float(position.x) * viewer_to_model_units
   y = _safe_float(position.y) * viewer_to_model_units
@@ -453,40 +441,7 @@ def _viewer_point_to_ifc_world(position: Point3D, viewer_to_model_units: float =
   return Point3D(x=ifc_x, y=ifc_y, z=ifc_z)
 
 
-def _parse_inverse_coordination_matrix(custom: dict[str, Any] | None) -> list[float] | None:
-  if not custom:
-    return None
-  raw = custom.get(INVERSE_COORDINATION_MATRIX_CUSTOM_KEY)
-  if not isinstance(raw, str) or not raw.strip():
-    return None
-  try:
-    parsed = json.loads(raw)
-  except json.JSONDecodeError:
-    return None
-  if not isinstance(parsed, list) or len(parsed) != 16:
-    return None
-  values = [_safe_float(value, 0.0) for value in parsed]
-  return values if len(values) == 16 else None
-
-
-def _apply_viewer_affine_matrix(point: Point3D, matrix: list[float] | None) -> Point3D:
-  if matrix is None or len(matrix) != 16:
-    return point
-
-  x = _safe_float(point.x)
-  y = _safe_float(point.y)
-  z = _safe_float(point.z)
-
-  try:
-    return Point3D(
-      x=matrix[0] * x + matrix[4] * y + matrix[8] * z + matrix[12],
-      y=matrix[1] * x + matrix[5] * y + matrix[9] * z + matrix[13],
-      z=matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14],
-    )
-  except Exception:
-    return point
-
-
+# Read numeric coordinates from an IFC point-like entity safely.
 def _safe_point_coords(entity: Any, expected_len: int = 3) -> tuple[float, ...] | None:
   coords = getattr(entity, "Coordinates", None)
   if coords is None:
@@ -497,6 +452,7 @@ def _safe_point_coords(entity: Any, expected_len: int = 3) -> tuple[float, ...] 
   return values
 
 
+# Transform a point by a 4x4 affine matrix.
 def _transform_point_by_matrix(point: Point3D, matrix: Any) -> Point3D:
   try:
     x = _safe_float(point.x)
@@ -511,6 +467,7 @@ def _transform_point_by_matrix(point: Point3D, matrix: Any) -> Point3D:
     return point
 
 
+# Convert an IfcAxis2Placement3D into a 4x4 matrix.
 def _axis2placement3d_to_matrix(placement: Any | None) -> list[list[float]] | None:
   if placement is None or not hasattr(placement, "is_a") or not placement.is_a("IfcAxis2Placement3D"):
     return None
@@ -561,6 +518,7 @@ def _axis2placement3d_to_matrix(placement: Any | None) -> list[list[float]] | No
   ]
 
 
+# Read the local anchor offset from a swept profile definition.
 def _read_profile_anchor_xy(profile: Any) -> tuple[float, float] | None:
   if profile is None or not hasattr(profile, "is_a"):
     return None
@@ -592,6 +550,7 @@ def _read_profile_anchor_xy(profile: Any) -> tuple[float, float] | None:
   return ((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0)
 
 
+# Unwrap mapped or styled representation items to their underlying geometry.
 def _unwrap_representation_item(item: Any) -> Any | None:
   current = item
   while current is not None and hasattr(current, "is_a") and current.is_a("IfcBooleanClippingResult"):
@@ -599,6 +558,7 @@ def _unwrap_representation_item(item: Any) -> Any | None:
   return current
 
 
+# Estimate the world anchor of a space from its geometry representation.
 def _read_space_geometric_anchor_world(space: Any) -> Point3D | None:
   if space is None or not hasattr(space, "is_a") or not space.is_a("IfcSpace"):
     return None
@@ -642,6 +602,7 @@ def _read_space_geometric_anchor_world(space: Any) -> Point3D | None:
   return None
 
 
+# Create and cache IfcOpenShell geometry settings for world coordinates.
 def _get_world_geom_settings() -> Any | None:
   global _WORLD_GEOM_SETTINGS
   if ifcopenshell_geom is None:
@@ -670,6 +631,7 @@ def _get_world_geom_settings() -> Any | None:
   return settings
 
 
+# Estimate the world anchor of a product from its geometry representation.
 def _read_product_geometric_anchor_world(product: Any) -> Point3D | None:
   settings = _get_world_geom_settings()
   if settings is None or ifcopenshell_geom is None:
@@ -706,6 +668,7 @@ def _read_product_geometric_anchor_world(product: Any) -> Point3D | None:
   )
 
 
+# Resolve the final IFC world position for an added furniture item.
 def _resolve_furniture_ifc_world_position(
   item: FurnitureItem,
   viewer_to_model_units: float,
@@ -738,6 +701,7 @@ def _resolve_furniture_ifc_world_position(
   return ifc_position
 
 
+# Convert viewer box scale into IFC box dimensions in model units.
 def _viewer_scale_to_ifc_box_dims(
   scale: Point3D | None,
   viewer_to_model_units: float = 1.0,
@@ -750,6 +714,7 @@ def _viewer_scale_to_ifc_box_dims(
   return (width, depth, height)
 
 
+# Convert viewer mesh vertices into IFC vertex coordinates.
 def _viewer_positions_to_ifc_vertices(
   positions: list[float],
   viewer_to_model_units: float = 1.0,
@@ -765,6 +730,7 @@ def _viewer_positions_to_ifc_vertices(
   return vertices
 
 
+# Rewrite a product placement so it sits at an absolute world position.
 def _set_product_absolute_position(model: Any, product: Any, position: Point3D) -> None:
   current_placement = getattr(product, "ObjectPlacement", None)
   if current_placement is not None and current_placement.is_a("IfcLocalPlacement"):
@@ -803,6 +769,7 @@ def _set_product_absolute_position(model: Any, product: Any, position: Point3D) 
   product.ObjectPlacement = _create_absolute_local_placement(model, position, axis, ref_direction)
 
 
+# Check whether an IFC product still owns child spatial or decomposition relations.
 def _product_has_children(product: Any) -> bool:
   for rel in list(getattr(product, "IsDecomposedBy", []) or []):
     related = list(getattr(rel, "RelatedObjects", []) or [])
@@ -819,6 +786,7 @@ def _product_has_children(product: Any) -> bool:
   return False
 
 
+# Return the numeric id of an IFC entity when available.
 def _entity_id(entity: Any) -> int | None:
   try:
     return int(entity.id())
@@ -826,6 +794,7 @@ def _entity_id(entity: Any) -> int | None:
     return None
 
 
+# Remove a product id from one inverse relation list safely.
 def _remove_from_relation_list(model: Any, rel: Any, attr_name: str, product_id: int) -> bool:
   related = list(getattr(rel, attr_name, []) or [])
   if not related:
@@ -840,6 +809,7 @@ def _remove_from_relation_list(model: Any, rel: Any, attr_name: str, product_id:
   return True
 
 
+# Detach a product from inverse IFC relations before deleting it.
 def _unlink_product_from_inverse_relations(model: Any, product: Any) -> None:
   product_id = _entity_id(product)
   if product_id is None:
@@ -868,12 +838,14 @@ def _unlink_product_from_inverse_relations(model: Any, product: Any) -> None:
       continue
 
 
+# Clear product representations so deleted elements no longer render.
 def _hide_product_geometry(product: Any) -> None:
   # Keep entity/type/style graph intact, just strip visible geometry.
   if hasattr(product, "Representation"):
     product.Representation = None
 
 
+# Delete a product only when it has no remaining dependent children.
 def _delete_ifc_product_if_leaf(model: Any, product: Any, warnings: list[str]) -> bool:
   if _product_has_children(product):
     warnings.append(f"Skipping delete for #{product.id()}: element has child elements.")
@@ -887,6 +859,7 @@ def _delete_ifc_product_if_leaf(model: Any, product: Any, warnings: list[str]) -
     return False
 
 
+# Create the best fitting IFC measure wrapper for a raw custom field value.
 def _create_ifc_measure_value(model: Any, raw_value: Any, preferred_ifc_type: str | None = None) -> Any:
   if preferred_ifc_type:
     type_name = preferred_ifc_type.strip()
@@ -909,6 +882,7 @@ def _create_ifc_measure_value(model: Any, raw_value: Any, preferred_ifc_type: st
   return model.create_entity("IfcLabel", "" if raw_value is None else str(raw_value))
 
 
+# Write one custom field either into a direct attribute or a PSET property.
 def _apply_custom_field_to_product(
   model: Any,
   product: Any,
@@ -949,6 +923,7 @@ def _apply_custom_field_to_product(
     return False
 
 
+# Find the main geometric representation context used for new geometry.
 def _find_representation_context(model: Any) -> Any | None:
   subcontexts = model.by_type("IfcGeometricRepresentationSubContext")
   for context in subcontexts:
@@ -973,6 +948,7 @@ def _find_representation_context(model: Any) -> Any | None:
   return None
 
 
+# Create a simple box representation for fallback furniture geometry.
 def _create_box_representation(
   model: Any,
   context: Any,
@@ -996,6 +972,7 @@ def _create_box_representation(
   return model.createIfcProductDefinitionShape(None, None, [shape])
 
 
+# Create a triangulated mesh representation for custom furniture geometry.
 def _create_mesh_representation(
   model: Any,
   context: Any,
@@ -1043,10 +1020,12 @@ def _create_mesh_representation(
   return model.createIfcProductDefinitionShape(None, None, [shape])
 
 
+# Normalize room numbers for stable matching across viewer and IFC data.
 def _normalize_room_number(value: Any) -> str:
   return str(value or "").strip().lower()
 
 
+# Check whether a space carries the requested normalized room number.
 def _space_matches_room_number(space: Any, room_number: str) -> bool:
   expected = _normalize_room_number(room_number)
   if not expected:
@@ -1072,19 +1051,7 @@ def _space_matches_room_number(space: Any, room_number: str) -> bool:
   return False
 
 
-def _has_baked_furniture_proxy(model: Any, item: FurnitureItem) -> bool:
-  item_id = str(item.id or "").strip()
-  if not item_id:
-    return False
-
-  for ifc_type in ("IfcFurnishingElement", "IfcBuildingElementProxy"):
-    for proxy in model.by_type(ifc_type):
-      tag = str(getattr(proxy, "Tag", "") or "").strip()
-      if tag == item_id:
-        return True
-  return False
-
-
+# Find the best spatial container for an added furniture item.
 def _resolve_furniture_container(model: Any, item: FurnitureItem, warnings: list[str]) -> Any | None:
   if item.spaceIfcId is not None:
     target = _safe_by_id(model, item.spaceIfcId)
@@ -1105,6 +1072,7 @@ def _resolve_furniture_container(model: Any, item: FurnitureItem, warnings: list
   return None
 
 
+# Attach a product to a room or other spatial structure relation.
 def _assign_product_to_spatial_structure(model: Any, product: Any, structure: Any) -> None:
   for rel in list(getattr(product, "ContainedInStructure", []) or []):
     if not rel.is_a("IfcRelContainedInSpatialStructure"):
@@ -1139,6 +1107,7 @@ def _assign_product_to_spatial_structure(model: Any, product: Any, structure: An
   )
 
 
+# Create and insert one added object as a new IFC furnishing element.
 def _add_furniture_as_proxy(
   model: Any,
   context: Any | None,
@@ -1238,6 +1207,7 @@ def _add_furniture_as_proxy(
   return True
 
 
+# Apply custom metadata edits stored in the metadata payload.
 def _apply_metadata_custom_updates(model: Any, product: Any, custom: dict[str, Any], warnings: list[str]) -> int:
   updates = 0
   for key, value in custom.items():
@@ -1254,6 +1224,7 @@ def _apply_metadata_custom_updates(model: Any, product: Any, custom: dict[str, A
   return updates
 
 
+# Read a move delta encoded in metadata custom JSON.
 def _parse_move_delta_from_custom(custom: dict[str, Any] | None) -> tuple[float, float, float] | None:
   if not custom:
     return None
@@ -1273,6 +1244,7 @@ def _parse_move_delta_from_custom(custom: dict[str, Any] | None) -> tuple[float,
   )
 
 
+# Convert a move delta point into a numeric tuple.
 def _parse_move_delta_from_point(point: Point3D | None) -> tuple[float, float, float] | None:
   if point is None:
     return None
@@ -1283,6 +1255,7 @@ def _parse_move_delta_from_point(point: Point3D | None) -> tuple[float, float, f
   )
 
 
+# Read a rotation delta encoded in metadata custom JSON.
 def _parse_rotate_delta_from_custom(custom: dict[str, Any] | None) -> tuple[float, float, float] | None:
   if not custom:
     return None
@@ -1302,6 +1275,7 @@ def _parse_rotate_delta_from_custom(custom: dict[str, Any] | None) -> tuple[floa
   )
 
 
+# Convert a rotation delta point into a numeric tuple.
 def _parse_rotate_delta_from_point(point: Point3D | None) -> tuple[float, float, float] | None:
   if point is None:
     return None
@@ -1312,6 +1286,7 @@ def _parse_rotate_delta_from_point(point: Point3D | None) -> tuple[float, float,
   )
 
 
+# Read an absolute placement position encoded in metadata custom JSON.
 def _parse_placement_position_from_custom(custom: dict[str, Any] | None) -> Point3D | None:
   if not custom:
     return None
@@ -1321,6 +1296,7 @@ def _parse_placement_position_from_custom(custom: dict[str, Any] | None) -> Poin
   return _parse_point_json(raw)
 
 
+# Read a room-relative position encoded in furniture custom JSON.
 def _parse_space_relative_position_from_custom(custom: dict[str, Any] | None) -> Point3D | None:
   if not custom:
     return None
@@ -1330,6 +1306,7 @@ def _parse_space_relative_position_from_custom(custom: dict[str, Any] | None) ->
   return _parse_point_json(raw)
 
 
+# Resolve the target IFC world position for a changed original element.
 def _resolve_metadata_ifc_world_position(
   entry: MetadataEntry,
   viewer_to_model_units: float,
@@ -1341,6 +1318,7 @@ def _resolve_metadata_ifc_world_position(
   return _viewer_point_to_ifc_world(viewer_position, viewer_to_model_units)
 
 
+# Parse a generic JSON point payload into Point3D.
 def _parse_point_json(raw: Any) -> Point3D | None:
   if isinstance(raw, Point3D):
     return raw
@@ -1362,6 +1340,7 @@ def _parse_point_json(raw: Any) -> Point3D | None:
     return None
 
 
+# Normalize a 3D vector and fall back when its length is invalid.
 def _normalize_direction(
   values: tuple[float, float, float],
   fallback: tuple[float, float, float],
@@ -1373,10 +1352,12 @@ def _normalize_direction(
   return (x / length, y / length, z / length)
 
 
+# Return the dot product of two 3D vectors.
 def _dot3(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
   return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 
 
+# Return the cross product of two 3D vectors.
 def _cross3(
   a: tuple[float, float, float],
   b: tuple[float, float, float],
@@ -1388,6 +1369,7 @@ def _cross3(
   )
 
 
+# Rotate a 3D vector by Euler angles in XYZ order.
 def _rotate_vector_xyz(
   vector: tuple[float, float, float],
   rx: float,
@@ -1412,6 +1394,7 @@ def _rotate_vector_xyz(
   return (x, y, z)
 
 
+# Read the last baked absolute position stored on a product, if any.
 def _read_previous_exported_position(product: Any) -> Point3D | None:
   pset_values = _read_pset_values(product, ELEMENT_STATE_PSET)
   if not pset_values:
@@ -1419,6 +1402,7 @@ def _read_previous_exported_position(product: Any) -> Point3D | None:
   return _parse_point_json(pset_values.get("PositionJson"))
 
 
+# Read the current product world position from its placement chain.
 def _read_product_world_position(product: Any) -> Point3D | None:
   placement = getattr(product, "ObjectPlacement", None)
   if placement is None:
@@ -1439,6 +1423,7 @@ def _read_product_world_position(product: Any) -> Point3D | None:
     return None
 
 
+# Subtract one 3D point from another.
 def _subtract_points(a: Point3D, b: Point3D) -> Point3D:
   return Point3D(
     x=_safe_float(a.x) - _safe_float(b.x),
@@ -1447,14 +1432,7 @@ def _subtract_points(a: Point3D, b: Point3D) -> Point3D:
   )
 
 
-def _add_points(a: Point3D, b: Point3D) -> Point3D:
-  return Point3D(
-    x=_safe_float(a.x) + _safe_float(b.x),
-    y=_safe_float(a.y) + _safe_float(b.y),
-    z=_safe_float(a.z) + _safe_float(b.z),
-  )
-
-
+# Infer the shared viewer-to-IFC origin offset from stored metadata.
 def _infer_viewer_model_origin_offset(
   model: Any,
   metadata: list[MetadataEntry],
@@ -1499,6 +1477,7 @@ def _infer_viewer_model_origin_offset(
   )
 
 
+# Read the rotation matrix of a placement parent for local delta conversion.
 def _placement_parent_rotation_matrix(placement: Any) -> list[list[float]] | None:
   parent = getattr(placement, "PlacementRelTo", None)
   if parent is None:
@@ -1519,6 +1498,7 @@ def _placement_parent_rotation_matrix(placement: Any) -> list[list[float]] | Non
     return None
 
 
+# Convert a world-space delta into the local frame of a placement.
 def _world_delta_to_local(placement: Any, dx: float, dy: float, dz: float) -> tuple[float, float, float]:
   rotation = _placement_parent_rotation_matrix(placement)
   if rotation is None:
@@ -1531,6 +1511,7 @@ def _world_delta_to_local(placement: Any, dx: float, dy: float, dz: float) -> tu
   )
 
 
+# Translate one local placement by a local-space delta.
 def _translate_local_placement_by_delta(placement: Any, dx: float, dy: float, dz: float) -> bool:
   if placement is None or not placement.is_a("IfcLocalPlacement"):
     return False
@@ -1561,11 +1542,13 @@ def _translate_local_placement_by_delta(placement: Any, dx: float, dy: float, dz
   return True
 
 
+# Translate a product placement by a world-space delta.
 def _translate_product_by_delta(product: Any, dx: float, dy: float, dz: float) -> bool:
   placement = getattr(product, "ObjectPlacement", None)
   return _translate_local_placement_by_delta(placement, dx, dy, dz)
 
 
+# Shift top-level product placements by one shared model offset.
 def _shift_root_product_placements(model: Any, dx: float, dy: float, dz: float) -> int:
   shifted = 0
   seen_placements: set[int] = set()
@@ -1586,12 +1569,14 @@ def _shift_root_product_placements(model: Any, dx: float, dy: float, dz: float) 
   return shifted
 
 
+# Convert a viewer delta vector into IFC world-axis order.
 def _viewer_delta_to_ifc_world(dx: float, dy: float, dz: float) -> tuple[float, float, float]:
   # Viewer uses Y-up coordinates while IFC world is Z-up in this pipeline.
   # Keep X, map viewer Y->IFC Z, and invert viewer Z when mapping to IFC Y.
   return (dx, -dz, dy)
 
 
+# Convert viewer Euler rotation into IFC world-axis order.
 def _viewer_rotation_to_ifc_world(rx: float, ry: float, rz: float) -> tuple[float, float, float]:
   # Viewer rotation deltas are stored in viewer axes (X right, Y up, Z forward).
   # IFC world in this pipeline is X right, Y depth, Z up.
@@ -1599,6 +1584,7 @@ def _viewer_rotation_to_ifc_world(rx: float, ry: float, rz: float) -> tuple[floa
   return (rx, -rz, ry)
 
 
+# Rotate a product placement by a delta expressed in viewer coordinates.
 def _rotate_product_by_delta(model: Any, product: Any, rx: float, ry: float, rz: float) -> bool:
   placement = getattr(product, "ObjectPlacement", None)
   if placement is None or not placement.is_a("IfcLocalPlacement"):
@@ -1677,6 +1663,7 @@ def _rotate_product_by_delta(model: Any, product: Any, rx: float, ry: float, rz:
   return False
 
 
+# Run the full export pipeline and write a new IFC with all pending changes.
 def _export_state(request: ExportStateRequest) -> ExportStateResponse:
   source_path = _resolve_existing_path(request.source_ifc_path, "source_ifc_path")
   target_path = _resolve_target_path(request.target_ifc_path)
@@ -1845,11 +1832,13 @@ def _export_state(request: ExportStateRequest) -> ExportStateResponse:
 
 
 @app.get("/health")
+# Return a simple health response for the service.
 def health() -> dict[str, str]:
   return {"status": "ok"}
 
 
 @app.post("/state/import", response_model=ImportStateResponse)
+# Handle the public import endpoint and wrap validation errors as HTTP responses.
 def import_state(payload: ImportStateRequest) -> ImportStateResponse:
   try:
     return _import_state(payload)
@@ -1863,6 +1852,7 @@ def import_state(payload: ImportStateRequest) -> ImportStateResponse:
 
 
 @app.post("/state/export", response_model=ExportStateResponse)
+# Handle the public export endpoint and wrap validation errors as HTTP responses.
 def export_state(payload: ExportStateRequest) -> ExportStateResponse:
   try:
     return _export_state(payload)
