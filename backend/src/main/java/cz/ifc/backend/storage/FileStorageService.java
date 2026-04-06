@@ -7,11 +7,9 @@ import cz.ifc.backend.model.HistoryEntry;
 import cz.ifc.backend.model.MetadataEntry;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.FileTime;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -19,7 +17,6 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.regex.Pattern;
@@ -144,8 +141,8 @@ public class FileStorageService {
       throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Missing IFC file");
     }
 
-    String originalFileName = sanitizeUploadFileName(file.getOriginalFilename());
-    String modelId = buildModelId(originalFileName);
+    String originalFileName = StoragePathHelper.sanitizeUploadFileName(file.getOriginalFilename());
+    String modelId = StoragePathHelper.buildStorageId(originalFileName);
     Path modelDir = resolveModelDir(projectId, modelId);
     Path ifcFilePath = modelDir.resolve(MODEL_FILE);
     Path manifestPath = modelDir.resolve(MODEL_MANIFEST_FILE);
@@ -156,13 +153,13 @@ public class FileStorageService {
     try {
       Files.createDirectories(modelDir);
       try (InputStream inputStream = file.getInputStream()) {
-        writeBinaryAtomically(ifcFilePath, inputStream);
+        StorageJsonHelper.writeBinaryAtomically(ifcFilePath, inputStream);
       }
       StoredModelManifest manifest = new StoredModelManifest(modelId, originalFileName, now, now);
-      writeAtomically(manifestPath, manifest);
-      ensureModelJsonFileExists(modelDir.resolve(METADATA_FILE));
-      ensureModelJsonFileExists(modelDir.resolve(FURNITURE_FILE));
-      ensureModelJsonFileExists(modelDir.resolve(HISTORY_FILE));
+      StorageJsonHelper.writeAtomically(manifestPath, manifest, objectMapper);
+      StorageJsonHelper.ensureJsonArrayFileExists(modelDir.resolve(METADATA_FILE), objectMapper);
+      StorageJsonHelper.ensureJsonArrayFileExists(modelDir.resolve(FURNITURE_FILE), objectMapper);
+      StorageJsonHelper.ensureJsonArrayFileExists(modelDir.resolve(HISTORY_FILE), objectMapper);
       return toStoredModelInfo(manifest);
     } catch (IOException ex) {
       throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to store IFC file", ex);
@@ -198,8 +195,8 @@ public class FileStorageService {
       throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Missing IFC prefab file");
     }
 
-    String originalFileName = sanitizeUploadFileName(file.getOriginalFilename());
-    String prefabId = buildModelId(originalFileName);
+    String originalFileName = StoragePathHelper.sanitizeUploadFileName(file.getOriginalFilename());
+    String prefabId = StoragePathHelper.buildStorageId(originalFileName);
     Path prefabDir = resolvePrefabDir(projectId, prefabId);
     Path ifcFilePath = prefabDir.resolve(PREFAB_FILE);
     Path manifestPath = prefabDir.resolve(PREFAB_MANIFEST_FILE);
@@ -210,10 +207,10 @@ public class FileStorageService {
     try {
       Files.createDirectories(prefabDir);
       try (InputStream inputStream = file.getInputStream()) {
-        writeBinaryAtomically(ifcFilePath, inputStream);
+        StorageJsonHelper.writeBinaryAtomically(ifcFilePath, inputStream);
       }
       StoredPrefabManifest manifest = new StoredPrefabManifest(prefabId, originalFileName, now, now);
-      writeAtomically(manifestPath, manifest);
+      StorageJsonHelper.writeAtomically(manifestPath, manifest, objectMapper);
       return toStoredPrefabInfo(manifest);
     } catch (IOException ex) {
       throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to store prefab IFC file", ex);
@@ -282,7 +279,7 @@ public class FileStorageService {
     modelFileLock.writeLock().lock();
     try (InputStream inputStream = Files.newInputStream(sourceIfcPath)) {
       Files.createDirectories(targetIfcPath.getParent());
-      writeBinaryAtomically(targetIfcPath, inputStream);
+      StorageJsonHelper.writeBinaryAtomically(targetIfcPath, inputStream);
       touchModelManifest(projectId, modelId);
       return getModelInfo(projectId, modelId);
     } catch (IOException ex) {
@@ -414,124 +411,56 @@ public class FileStorageService {
   }
 
   private <T> List<T> readList(Path filePath, TypeReference<List<T>> type) {
-    ReentrantReadWriteLock lock = lockFor(filePath);
-    lock.readLock().lock();
     try {
-      if (!Files.exists(filePath)) {
-        return new ArrayList<>();
-      }
-      try (InputStream inputStream = Files.newInputStream(filePath)) {
-        return objectMapper.readValue(inputStream, type);
-      }
+      return StorageJsonHelper.readList(filePath, type, objectMapper, locks);
     } catch (IOException ex) {
       throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to read data", ex);
-    } finally {
-      lock.readLock().unlock();
     }
   }
 
   private <T> void writeList(Path filePath, List<T> items) {
-    ReentrantReadWriteLock lock = lockFor(filePath);
-    lock.writeLock().lock();
     try {
-      log.info("Saving {} items to {}", items.size(), filePath);
-      Files.createDirectories(filePath.getParent());
-      writeAtomically(filePath, items);
+      StorageJsonHelper.writeList(filePath, items, objectMapper, locks, log);
     } catch (IOException ex) {
       throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to write data", ex);
-    } finally {
-      lock.writeLock().unlock();
     }
   }
 
   // Ensure projectId is safe and resolve to a file path inside baseDir.
   private Path resolveProjectFile(String projectId, String fileName) {
-    return resolveProjectDir(projectId).resolve(fileName);
+    return StoragePathHelper.resolveProjectFile(baseDir, PROJECT_ID_PATTERN, projectId, fileName);
   }
 
   private Path resolveProjectDir(String projectId) {
-    if (!PROJECT_ID_PATTERN.matcher(projectId).matches()) {
-      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid projectId");
-    }
-    Path projectDir = baseDir.resolve(projectId).normalize();
-    if (!projectDir.startsWith(baseDir)) {
-      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid projectId");
-    }
-    return projectDir;
+    return StoragePathHelper.resolveProjectDir(baseDir, PROJECT_ID_PATTERN, projectId);
   }
 
   private Path resolveModelsDir(String projectId) {
-    return resolveProjectDir(projectId).resolve(MODELS_DIR);
+    return StoragePathHelper.resolveModelsDir(baseDir, PROJECT_ID_PATTERN, projectId, MODELS_DIR);
   }
 
   private Path resolvePrefabsDir(String projectId) {
-    return resolveProjectDir(projectId).resolve(PREFABS_DIR);
+    return StoragePathHelper.resolvePrefabsDir(baseDir, PROJECT_ID_PATTERN, projectId, PREFABS_DIR);
   }
 
   private Path resolveModelDir(String projectId, String modelId) {
-    if (!MODEL_ID_PATTERN.matcher(modelId).matches()) {
-      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid modelId");
-    }
-    Path modelsDir = resolveModelsDir(projectId);
-    Path modelDir = modelsDir.resolve(modelId).normalize();
-    if (!modelDir.startsWith(modelsDir)) {
-      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid modelId");
-    }
-    return modelDir;
+    return StoragePathHelper.resolveModelDir(
+        baseDir, PROJECT_ID_PATTERN, MODEL_ID_PATTERN, projectId, modelId, MODELS_DIR);
   }
 
   private Path resolvePrefabDir(String projectId, String prefabId) {
-    if (!PREFAB_ID_PATTERN.matcher(prefabId).matches()) {
-      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid prefabId");
-    }
-    Path prefabsDir = resolvePrefabsDir(projectId);
-    Path prefabDir = prefabsDir.resolve(prefabId).normalize();
-    if (!prefabDir.startsWith(prefabsDir)) {
-      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid prefabId");
-    }
-    return prefabDir;
+    return StoragePathHelper.resolvePrefabDir(
+        baseDir, PROJECT_ID_PATTERN, PREFAB_ID_PATTERN, projectId, prefabId, PREFABS_DIR);
   }
 
   private Path resolveModelFile(String projectId, String modelId, String fileName) {
-    return resolveModelDir(projectId, modelId).resolve(fileName);
+    return StoragePathHelper.resolveModelFile(
+        baseDir, PROJECT_ID_PATTERN, MODEL_ID_PATTERN, projectId, modelId, MODELS_DIR, fileName);
   }
 
   // One read/write lock per file path.
   private ReentrantReadWriteLock lockFor(Path path) {
-    return locks.computeIfAbsent(path, ignored -> new ReentrantReadWriteLock());
-  }
-
-  // Write through a temp file and move to keep partial writes from corrupting the JSON.
-  private void writeAtomically(Path targetFile, Object value) throws IOException {
-    Path tempFile = Files.createTempFile(targetFile.getParent(), targetFile.getFileName().toString(), ".tmp");
-    objectMapper.writerWithDefaultPrettyPrinter().writeValue(tempFile.toFile(), value);
-    try {
-      Files.move(tempFile, targetFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-    } catch (AtomicMoveNotSupportedException ex) {
-      Files.move(tempFile, targetFile, StandardCopyOption.REPLACE_EXISTING);
-    }
-  }
-
-  private void writeBinaryAtomically(Path targetFile, InputStream inputStream) throws IOException {
-    Path tempFile = Files.createTempFile(targetFile.getParent(), targetFile.getFileName().toString(), ".tmp");
-    try {
-      Files.copy(inputStream, tempFile, StandardCopyOption.REPLACE_EXISTING);
-      try {
-        Files.move(tempFile, targetFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-      } catch (AtomicMoveNotSupportedException ex) {
-        Files.move(tempFile, targetFile, StandardCopyOption.REPLACE_EXISTING);
-      }
-    } catch (IOException ex) {
-      Files.deleteIfExists(tempFile);
-      throw ex;
-    }
-  }
-
-  private void ensureModelJsonFileExists(Path filePath) throws IOException {
-    if (Files.exists(filePath)) {
-      return;
-    }
-    writeAtomically(filePath, new ArrayList<>());
+    return StorageJsonHelper.lockFor(locks, path);
   }
 
   private void touchModelManifest(String projectId, String modelId) {
@@ -544,7 +473,7 @@ public class FileStorageService {
         Instant now = Instant.now();
         StoredModelManifest manifest =
             new StoredModelManifest(modelId, modelId + ".ifc", now, now);
-        writeAtomically(manifestPath, manifest);
+        StorageJsonHelper.writeAtomically(manifestPath, manifest, objectMapper);
         return;
       }
       StoredModelManifest existing = objectMapper.readValue(manifestPath.toFile(), StoredModelManifest.class);
@@ -552,7 +481,7 @@ public class FileStorageService {
       String fileName = existing.fileName() != null ? existing.fileName() : modelId + ".ifc";
       StoredModelManifest updated =
           new StoredModelManifest(existing.modelId() != null ? existing.modelId() : modelId, fileName, createdAt, Instant.now());
-      writeAtomically(manifestPath, updated);
+      StorageJsonHelper.writeAtomically(manifestPath, updated, objectMapper);
     } catch (IOException ex) {
       throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to update model manifest", ex);
     } finally {
@@ -622,36 +551,6 @@ public class FileStorageService {
       log.warn("Skipping unreadable prefab directory {}", prefabDir, ex);
       return null;
     }
-  }
-
-  private String sanitizeUploadFileName(String originalFileName) {
-    if (originalFileName == null || originalFileName.isBlank()) {
-      return "model.ifc";
-    }
-    String baseName = originalFileName.replace('\\', '/');
-    int separatorIndex = baseName.lastIndexOf('/');
-    if (separatorIndex >= 0 && separatorIndex < baseName.length() - 1) {
-      baseName = baseName.substring(separatorIndex + 1);
-    }
-    String cleaned = baseName.trim();
-    if (cleaned.isEmpty()) {
-      return "model.ifc";
-    }
-    return cleaned;
-  }
-
-  private String buildModelId(String originalFileName) {
-    String stem = originalFileName;
-    int dotIndex = stem.lastIndexOf('.');
-    if (dotIndex > 0) {
-      stem = stem.substring(0, dotIndex);
-    }
-    String slug = stem.replaceAll("[^A-Za-z0-9_-]+", "-").replaceAll("(^-+|-+$)", "");
-    if (slug.isBlank()) {
-      slug = "model";
-    }
-    String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
-    return slug + "-" + suffix;
   }
 
   private void deleteRecursively(Path targetDir, String label) {
