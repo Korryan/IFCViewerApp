@@ -179,9 +179,9 @@ This prevents writes outside the storage root.
 Safe IFC helpers:
 
 - `_safe_by_id(...)`
-- `_try_json_dict(...)`
-- `_try_json_point(...)`
-- `_try_json_list(...)`
+- `_safe_float(...)`
+- `_safe_point_coords(...)`
+- `_parse_point_json(...)`
 
 These helpers are there to avoid export crashes on broken or incomplete data.
 

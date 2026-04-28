@@ -6,7 +6,6 @@ import math
 import os
 import re
 import shutil
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -43,12 +42,14 @@ _WORLD_GEOM_SETTINGS: Any | None = None
 
 
 class Point3D(BaseModel):
+  # Represent one 3D point or vector exchanged between the viewer and IFC export.
   x: float
   y: float
   z: float
 
 
 class MetadataEntry(BaseModel):
+  # Describe one edited IFC element and the transform or metadata changes to apply.
   ifcId: int
   type: str | None = None
   custom: dict[str, Any] | None = None
@@ -61,11 +62,13 @@ class MetadataEntry(BaseModel):
 
 
 class FurnitureGeometry(BaseModel):
+  # Store optional raw mesh geometry for custom furniture exported as IFC.
   positions: list[float] = Field(default_factory=list)
   indices: list[int] = Field(default_factory=list)
 
 
 class FurnitureItem(BaseModel):
+  # Describe one added viewer object that should be exported as IFC furniture.
   id: str
   model: str
   name: str | None = None
@@ -80,16 +83,19 @@ class FurnitureItem(BaseModel):
 
 
 class HistoryEntry(BaseModel):
+  # Record one editor history event that may be persisted alongside the model.
   ifcId: int
   label: str
   timestamp: str
 
 
 class ImportStateRequest(BaseModel):
+  # Point the import endpoint at an IFC file stored inside the data root.
   source_ifc_path: str
 
 
 class ImportStateResponse(BaseModel):
+  # Return the editor state recovered from IFC, which is currently an empty response.
   metadata: list[MetadataEntry] = Field(default_factory=list)
   furniture: list[FurnitureItem] = Field(default_factory=list)
   history: list[HistoryEntry] = Field(default_factory=list)
@@ -97,6 +103,7 @@ class ImportStateResponse(BaseModel):
 
 
 class ExportStateRequest(BaseModel):
+  # Carry the source IFC plus all pending editor changes that should be baked into a new file.
   source_ifc_path: str
   target_ifc_path: str
   metadata: list[MetadataEntry] = Field(default_factory=list)
@@ -105,16 +112,12 @@ class ExportStateRequest(BaseModel):
 
 
 class ExportStateResponse(BaseModel):
+  # Report where the exported IFC was written and how many editor records were processed.
   target_ifc_path: str
   exported_metadata_count: int
   exported_furniture_count: int
   exported_history_count: int
   warnings: list[str] = Field(default_factory=list)
-
-
-# Return the current UTC timestamp as an ISO string.
-def _now_iso() -> str:
-  return datetime.now(UTC).isoformat()
 
 
 # Check whether a resolved path stays inside the configured data root.
@@ -165,26 +168,6 @@ def _safe_by_id(model: Any, entity_id: Any) -> Any | None:
     return model.by_id(int(entity_id))
   except Exception:
     return None
-
-
-# Parse a JSON object safely and collect warnings instead of failing hard.
-def _try_json_dict(raw: Any, warnings: list[str], field_name: str) -> dict[str, Any] | None:
-  if raw is None:
-    return None
-  if isinstance(raw, dict):
-    return raw
-  if not isinstance(raw, str):
-    warnings.append(f"{field_name} is not valid JSON text")
-    return None
-  try:
-    parsed = json.loads(raw)
-  except json.JSONDecodeError:
-    warnings.append(f"{field_name} JSON decode failed")
-    return None
-  if not isinstance(parsed, dict):
-    warnings.append(f"{field_name} JSON is not an object")
-    return None
-  return parsed
 
 
 # Convert loose user or IFC values into a boolean when possible.
