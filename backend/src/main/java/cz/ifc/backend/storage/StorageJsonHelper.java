@@ -44,6 +44,27 @@ final class StorageJsonHelper {
     }
   }
 
+  // Reads one JSON object file under a read lock and returns null when the file does not exist.
+  static <T> T readValue(
+      Path filePath,
+      Class<T> type,
+      ObjectMapper objectMapper,
+      ConcurrentHashMap<Path, ReentrantReadWriteLock> locks)
+      throws IOException {
+    ReentrantReadWriteLock lock = lockFor(locks, filePath);
+    lock.readLock().lock();
+    try {
+      if (!Files.exists(filePath)) {
+        return null;
+      }
+      try (InputStream inputStream = Files.newInputStream(filePath)) {
+        return objectMapper.readValue(inputStream, type);
+      }
+    } finally {
+      lock.readLock().unlock();
+    }
+  }
+
   // Writes a JSON list file under a write lock using an atomic temp-file replacement strategy.
   static <T> void writeList(
       Path filePath,
@@ -58,6 +79,25 @@ final class StorageJsonHelper {
       log.info("Saving {} items to {}", items.size(), filePath);
       Files.createDirectories(filePath.getParent());
       writeAtomically(filePath, items, objectMapper);
+    } finally {
+      lock.writeLock().unlock();
+    }
+  }
+
+  // Writes one JSON object file under a write lock using the shared atomic temp-file strategy.
+  static void writeValue(
+      Path filePath,
+      Object value,
+      ObjectMapper objectMapper,
+      ConcurrentHashMap<Path, ReentrantReadWriteLock> locks,
+      Logger log)
+      throws IOException {
+    ReentrantReadWriteLock lock = lockFor(locks, filePath);
+    lock.writeLock().lock();
+    try {
+      log.info("Saving JSON value to {}", filePath);
+      Files.createDirectories(filePath.getParent());
+      writeAtomically(filePath, value, objectMapper);
     } finally {
       lock.writeLock().unlock();
     }

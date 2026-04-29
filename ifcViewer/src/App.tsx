@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react'
 import {
   IfcViewer,
+  type IfcViewerHandle,
   type FurnitureItem,
   type HistoryEntry,
-  type MetadataEntry
+  type MetadataEntry,
+  type ViewerState
 } from 'ifc-viewer-component'
 import { applyIfcState, exportIfcState } from './api/ifcOpenShellApi'
 import { fetchJson, fetchOk } from './app/appApi'
+import { readViewerState, writeViewerState } from './app/appViewerStateApi'
 import { AppToolbar } from './app/AppToolbar'
 import type { StoredModelInfo, StoredPrefabInfo } from './app/appTypes'
 import './App.css'
@@ -20,12 +23,14 @@ function App() {
   const [metadata, setMetadata] = useState<MetadataEntry[] | undefined>(undefined)
   const [furniture, setFurniture] = useState<FurnitureItem[] | undefined>(undefined)
   const [history, setHistory] = useState<HistoryEntry[] | undefined>(undefined)
+  const [viewerState, setViewerState] = useState<ViewerState | null | undefined>(undefined)
   const [isHydrated, setIsHydrated] = useState(false)
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [isExportingIfcState, setIsExportingIfcState] = useState(false)
   const [isApplyingIfcState, setIsApplyingIfcState] = useState(false)
   const requestTokenRef = useRef(0)
+  const viewerHandleRef = useRef<IfcViewerHandle | null>(null)
 
   const projectApiBase = import.meta.env.VITE_API_BASE ?? 'http://localhost:8080/projects/1'
   const activeModelApiBase = activeModel
@@ -44,6 +49,7 @@ function App() {
     setMetadata([])
     setFurniture([])
     setHistory([])
+    setViewerState(null)
     setIsHydrated(false)
   }, [])
 
@@ -54,21 +60,24 @@ function App() {
       setErrorMessage(null)
       setStatusMessage(options?.status ?? null)
       setIsHydrated(false)
+      setViewerState(undefined)
       setActiveModel(modelInfo)
       setSelectedFile(options?.localFile ?? null)
 
       const modelApiBase = `${projectApiBase}/models/${encodeURIComponent(modelInfo.modelId)}`
       try {
-        const [loadedMetadata, loadedFurniture, loadedHistory] = await Promise.all([
+        const [loadedMetadata, loadedFurniture, loadedHistory, loadedViewerState] = await Promise.all([
           fetchJson<MetadataEntry[]>(`${modelApiBase}/metadata`),
           fetchJson<FurnitureItem[]>(`${modelApiBase}/furniture`),
-          fetchJson<HistoryEntry[]>(`${modelApiBase}/history`)
+          fetchJson<HistoryEntry[]>(`${modelApiBase}/history`),
+          readViewerState(modelApiBase)
         ])
         if (requestTokenRef.current !== token) return
 
         setMetadata(Array.isArray(loadedMetadata) ? loadedMetadata : [])
         setFurniture(Array.isArray(loadedFurniture) ? loadedFurniture : [])
         setHistory(Array.isArray(loadedHistory) ? loadedHistory : [])
+        setViewerState(loadedViewerState)
         setStatusMessage(null)
         setIsHydrated(true)
       } catch (err) {
@@ -77,6 +86,7 @@ function App() {
         setMetadata([])
         setFurniture([])
         setHistory([])
+        setViewerState(null)
         setStatusMessage(null)
         setErrorMessage('Failed to load saved metadata for the selected model.')
       }
@@ -335,6 +345,10 @@ function App() {
     setStatusMessage(`Applying changes into ${activeModel.fileName}...`)
     setIsApplyingIfcState(true)
     try {
+      const savedViewerState = await writeViewerState(
+        activeModelApiBase,
+        viewerHandleRef.current?.captureViewerState() ?? {}
+      )
       const result = await applyIfcState(activeModelApiBase, {
         metadata: metadata ?? [],
         furniture: furniture ?? [],
@@ -350,6 +364,7 @@ function App() {
         localFile: null,
         status: `Reloading ${result.model.fileName}...`
       })
+      setViewerState(savedViewerState)
 
       const warningSuffix = result.warnings.length > 0 ? ` (${result.warnings.length} warnings)` : ''
       setStatusMessage(
@@ -458,11 +473,13 @@ function App() {
 
       <section className="viewer-shell">
         <IfcViewer
+          ref={viewerHandleRef}
           file={selectedFile ?? undefined}
           defaultModelUrl={selectedFile ? undefined : activeModelUrl}
           metadata={metadata}
           furniture={furniture}
           history={history}
+          viewerState={viewerState}
           prefabs={savedPrefabs}
           onMetadataChange={setMetadata}
           onFurnitureChange={setFurniture}

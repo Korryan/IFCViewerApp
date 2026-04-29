@@ -1,19 +1,26 @@
 package cz.ifc.backend.storage;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import cz.ifc.backend.model.FurnitureItem;
 import cz.ifc.backend.model.HistoryEntry;
 import cz.ifc.backend.model.MetadataEntry;
+import cz.ifc.backend.model.ViewerStateSnapshot;
+import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.regex.Pattern;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.server.ResponseStatusException;
 
 @Service
 public class FileStorageService {
@@ -22,6 +29,7 @@ public class FileStorageService {
   private static final String METADATA_FILE = "metadata.json";
   private static final String FURNITURE_FILE = "furniture.json";
   private static final String HISTORY_FILE = "history.json";
+  private static final String VIEWER_STATE_FILE = "viewer-state.json";
   private static final String MODELS_DIR = "models";
   private static final String MODEL_FILE = "model.ifc";
   private static final String MODEL_MANIFEST_FILE = "model.json";
@@ -33,13 +41,16 @@ public class FileStorageService {
 
   // Base directory for file-backed storage.
   private final Path baseDir;
+  private final ObjectMapper objectMapper;
+  private final ConcurrentHashMap<Path, ReentrantReadWriteLock> locks;
   private final StorageProjectStateFacade projectStateFacade;
   private final StorageCatalogFacade catalogFacade;
 
   public FileStorageService(
       @Value("${storage.base-dir:data}") String baseDir,
-      com.fasterxml.jackson.databind.ObjectMapper objectMapper) {
+      ObjectMapper objectMapper) {
     this.baseDir = Paths.get(baseDir).toAbsolutePath().normalize();
+    this.objectMapper = objectMapper;
     StorageCatalogPaths storagePaths =
         new StorageCatalogPaths(
             this.baseDir,
@@ -52,13 +63,12 @@ public class FileStorageService {
             PREFABS_DIR,
             PREFAB_FILE,
             PREFAB_MANIFEST_FILE);
-    java.util.concurrent.ConcurrentHashMap<Path, java.util.concurrent.locks.ReentrantReadWriteLock> locks =
-        new java.util.concurrent.ConcurrentHashMap<>();
+    this.locks = new ConcurrentHashMap<>();
     this.projectStateFacade =
         new StorageProjectStateFacade(
             storagePaths,
             objectMapper,
-            locks,
+            this.locks,
             log,
             METADATA_FILE,
             FURNITURE_FILE,
@@ -67,7 +77,7 @@ public class FileStorageService {
         new StorageCatalogFacade(
             storagePaths,
             objectMapper,
-            locks,
+            this.locks,
             log,
             METADATA_FILE,
             FURNITURE_FILE,
@@ -142,6 +152,28 @@ public class FileStorageService {
     return projectStateFacade.writeHistory(projectId, modelId, items);
   }
 
+  // Reads the model-scoped viewer session snapshot used to restore camera and mode state.
+  public ViewerStateSnapshot readViewerState(String projectId, String modelId) {
+    try {
+      ViewerStateSnapshot viewerState =
+          StorageJsonHelper.readValue(getViewerStatePath(projectId, modelId), ViewerStateSnapshot.class, objectMapper, locks);
+      return viewerState != null ? viewerState : new ViewerStateSnapshot();
+    } catch (IOException ex) {
+      throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to read viewer state", ex);
+    }
+  }
+
+  // Writes the model-scoped viewer session snapshot used to restore camera and mode state.
+  public ViewerStateSnapshot writeViewerState(String projectId, String modelId, ViewerStateSnapshot viewerState) {
+    ViewerStateSnapshot normalized = viewerState != null ? viewerState : new ViewerStateSnapshot();
+    try {
+      StorageJsonHelper.writeValue(getViewerStatePath(projectId, modelId), normalized, objectMapper, locks, log);
+      return normalized;
+    } catch (IOException ex) {
+      throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to write viewer state", ex);
+    }
+  }
+
   public StoredModelInfo storeUploadedModel(String projectId, MultipartFile file) {
     return catalogFacade.storeUploadedModel(projectId, file);
   }
@@ -200,6 +232,11 @@ public class FileStorageService {
 
   public Path getModelExportIfcPath(String projectId, String modelId, String exportFileName) {
     return catalogFacade.getModelExportIfcPath(projectId, modelId, exportFileName);
+  }
+
+  // Resolves the model-scoped JSON file that stores the last persisted viewer session state.
+  private Path getViewerStatePath(String projectId, String modelId) {
+    return getModelIfcPath(projectId, modelId).getParent().resolve(VIEWER_STATE_FILE);
   }
 
 }

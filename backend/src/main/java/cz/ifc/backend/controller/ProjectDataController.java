@@ -4,6 +4,7 @@ import cz.ifc.backend.ifcopenshell.IfcOpenShellClient;
 import cz.ifc.backend.model.FurnitureItem;
 import cz.ifc.backend.model.HistoryEntry;
 import cz.ifc.backend.model.MetadataEntry;
+import cz.ifc.backend.model.ViewerStateSnapshot;
 import cz.ifc.backend.storage.FileStorageService;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -335,6 +336,23 @@ public class ProjectDataController {
       @PathVariable String modelId,
       @RequestBody(required = false) List<HistoryEntry> items) {
     return storageService.writeHistory(projectId, modelId, items);
+  }
+
+  // Loads the last persisted viewer session snapshot for one stored model.
+  @GetMapping("/models/{modelId}/viewer-state")
+  public ViewerStateSnapshot getModelViewerState(
+      @PathVariable String projectId,
+      @PathVariable String modelId) {
+    return storageService.readViewerState(projectId, modelId);
+  }
+
+  // Replaces the last persisted viewer session snapshot for one stored model.
+  @PutMapping(path = "/models/{modelId}/viewer-state", consumes = MediaType.APPLICATION_JSON_VALUE)
+  public ViewerStateSnapshot putModelViewerState(
+      @PathVariable String projectId,
+      @PathVariable String modelId,
+      @RequestBody(required = false) ViewerStateSnapshot viewerState) {
+    return storageService.writeViewerState(projectId, modelId, viewerState);
   }
 
   private <T> List<T> safeList(List<T> items) {
