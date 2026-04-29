@@ -55,12 +55,18 @@ function App() {
 
   // This loads saved metadata, furniture, and history for one model selected in the UI.
   const loadModelData = useCallback(
-    async (modelInfo: StoredModelInfo, options?: { localFile?: File | null; status?: string | null }) => {
+    async (
+      modelInfo: StoredModelInfo,
+      options?: { localFile?: File | null; status?: string | null; initialViewerState?: ViewerState | null }
+    ) => {
       const token = ++requestTokenRef.current
       setErrorMessage(null)
       setStatusMessage(options?.status ?? null)
       setIsHydrated(false)
-      setViewerState(undefined)
+      setMetadata(undefined)
+      setFurniture(undefined)
+      setHistory(undefined)
+      setViewerState(options?.initialViewerState)
       setActiveModel(modelInfo)
       setSelectedFile(options?.localFile ?? null)
 
@@ -349,6 +355,7 @@ function App() {
         activeModelApiBase,
         viewerHandleRef.current?.captureViewerState() ?? {}
       )
+      setViewerState(savedViewerState)
       const result = await applyIfcState(activeModelApiBase, {
         metadata: metadata ?? [],
         furniture: furniture ?? [],
@@ -362,9 +369,9 @@ function App() {
 
       await loadModelData(result.model, {
         localFile: null,
-        status: `Reloading ${result.model.fileName}...`
+        status: `Reloading ${result.model.fileName}...`,
+        initialViewerState: savedViewerState
       })
-      setViewerState(savedViewerState)
 
       const warningSuffix = result.warnings.length > 0 ? ` (${result.warnings.length} warnings)` : ''
       setStatusMessage(
