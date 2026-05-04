@@ -415,6 +415,22 @@ def _world_vector_to_local_relative(
   )
 
 
+# Convert a parent-placement direction vector into world-space axes.
+def _local_vector_to_world_relative(
+  parent_placement: Any,
+  vector: tuple[float, float, float],
+) -> tuple[float, float, float]:
+  rotation = _placement_rotation_matrix(parent_placement)
+  if rotation is None:
+    return vector
+  dx, dy, dz = vector
+  return (
+    rotation[0][0] * dx + rotation[0][1] * dy + rotation[0][2] * dz,
+    rotation[1][0] * dx + rotation[1][1] * dy + rotation[1][2] * dz,
+    rotation[2][0] * dx + rotation[2][1] * dy + rotation[2][2] * dz,
+  )
+
+
 # Convert a viewer position into IFC world axes and model units.
 def _viewer_point_to_ifc_world(position: Point3D, viewer_to_model_units: float = 1.0) -> Point3D:
   x = _safe_float(position.x) * viewer_to_model_units
@@ -1568,13 +1584,21 @@ def _viewer_rotation_to_ifc_world(rx: float, ry: float, rz: float) -> tuple[floa
 
 
 # Rotate a product placement by a delta expressed in viewer coordinates.
-def _rotate_product_by_delta(model: Any, product: Any, rx: float, ry: float, rz: float) -> bool:
+def _rotate_product_by_delta(
+  model: Any,
+  product: Any,
+  rx: float,
+  ry: float,
+  rz: float,
+  keep_anchor: bool = False,
+) -> bool:
   placement = getattr(product, "ObjectPlacement", None)
   if placement is None or not placement.is_a("IfcLocalPlacement"):
     return False
   relative = getattr(placement, "RelativePlacement", None)
   if relative is None:
     return False
+  anchor_before = _read_product_geometric_anchor_world(product) if keep_anchor else None
 
   if relative.is_a("IfcAxis2Placement3D"):
     axis_dir = getattr(relative, "Axis", None)
@@ -1611,10 +1635,44 @@ def _rotate_product_by_delta(model: Any, product: Any, rx: float, ry: float, rz:
     )
     axis = _normalize_direction(_cross3(ref, _cross3(axis, ref)), axis)
 
-    rotated_axis = _normalize_direction(_rotate_vector_xyz(axis, rx, ry, rz), axis)
-    rotated_ref = _normalize_direction(_rotate_vector_xyz(ref, rx, ry, rz), ref)
+    parent_placement = getattr(placement, "PlacementRelTo", None)
+    world_axis = (
+      _local_vector_to_world_relative(parent_placement, axis)
+      if parent_placement is not None
+      else axis
+    )
+    world_ref = (
+      _local_vector_to_world_relative(parent_placement, ref)
+      if parent_placement is not None
+      else ref
+    )
 
-    # Re-orthogonalize reference against new axis for valid Axis2Placement3D basis.
+    rotated_world_axis = _normalize_direction(_rotate_vector_xyz(world_axis, rx, ry, rz), world_axis)
+    rotated_world_ref = _normalize_direction(_rotate_vector_xyz(world_ref, rx, ry, rz), world_ref)
+
+    # Re-orthogonalize in world space, then convert back to the parent-local placement frame.
+    rotated_ref_proj = _dot3(rotated_world_ref, rotated_world_axis)
+    rotated_world_ref = _normalize_direction(
+      (
+        rotated_world_ref[0] - rotated_world_axis[0] * rotated_ref_proj,
+        rotated_world_ref[1] - rotated_world_axis[1] * rotated_ref_proj,
+        rotated_world_ref[2] - rotated_world_axis[2] * rotated_ref_proj,
+      ),
+      world_ref,
+    )
+
+    rotated_axis = (
+      _world_vector_to_local_relative(parent_placement, rotated_world_axis)
+      if parent_placement is not None
+      else rotated_world_axis
+    )
+    rotated_ref = (
+      _world_vector_to_local_relative(parent_placement, rotated_world_ref)
+      if parent_placement is not None
+      else rotated_world_ref
+    )
+    rotated_axis = _normalize_direction(rotated_axis, axis)
+    rotated_ref = _normalize_direction(rotated_ref, ref)
     rotated_ref_proj = _dot3(rotated_ref, rotated_axis)
     rotated_ref = _normalize_direction(
       (
@@ -1622,11 +1680,19 @@ def _rotate_product_by_delta(model: Any, product: Any, rx: float, ry: float, rz:
         rotated_ref[1] - rotated_axis[1] * rotated_ref_proj,
         rotated_ref[2] - rotated_axis[2] * rotated_ref_proj,
       ),
-      (1.0, 0.0, 0.0),
+      ref,
     )
 
     relative.Axis = model.createIfcDirection(rotated_axis)
     relative.RefDirection = model.createIfcDirection(rotated_ref)
+    anchor_after = _read_product_geometric_anchor_world(product)
+    if anchor_before is not None and anchor_after is not None:
+      _translate_product_by_delta(
+        product,
+        _safe_float(anchor_before.x) - _safe_float(anchor_after.x),
+        _safe_float(anchor_before.y) - _safe_float(anchor_after.y),
+        _safe_float(anchor_before.z) - _safe_float(anchor_after.z),
+      )
     return True
 
   if relative.is_a("IfcAxis2Placement2D"):
@@ -1768,7 +1834,14 @@ def _export_state(request: ExportStateRequest) -> ExportStateResponse:
           rx, ry, rz = rotate_delta
           rx, ry, rz = _viewer_rotation_to_ifc_world(rx, ry, rz)
           if abs(rx) > 1e-9 or abs(ry) > 1e-9 or abs(rz) > 1e-9:
-            if _rotate_product_by_delta(model, product, rx, ry, rz):
+            if _rotate_product_by_delta(
+              model,
+              product,
+              rx,
+              ry,
+              rz,
+              keep_anchor=abs(rx) > 1e-9 and abs(ry) <= 1e-9 and abs(rz) <= 1e-9,
+            ):
               hard_rotated += 1
             else:
               warnings.append(

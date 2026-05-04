@@ -9,7 +9,7 @@ import {
 } from 'ifc-viewer-component'
 import { applyIfcState, exportIfcState } from './api/ifcOpenShellApi'
 import { fetchJson, fetchOk } from './app/appApi'
-import { readViewerState, writeViewerState } from './app/appViewerStateApi'
+import { writeViewerState } from './app/appViewerStateApi'
 import { AppToolbar } from './app/AppToolbar'
 import type { StoredModelInfo, StoredPrefabInfo } from './app/appTypes'
 import './App.css'
@@ -53,7 +53,7 @@ function App() {
     setIsHydrated(false)
   }, [])
 
-  // This loads saved metadata, furniture, and history for one model selected in the UI.
+  // This loads saved editor state for one model and only restores viewer state when apply-state explicitly provides it.
   const loadModelData = useCallback(
     async (
       modelInfo: StoredModelInfo,
@@ -72,18 +72,17 @@ function App() {
 
       const modelApiBase = `${projectApiBase}/models/${encodeURIComponent(modelInfo.modelId)}`
       try {
-        const [loadedMetadata, loadedFurniture, loadedHistory, loadedViewerState] = await Promise.all([
+        const [loadedMetadata, loadedFurniture, loadedHistory] = await Promise.all([
           fetchJson<MetadataEntry[]>(`${modelApiBase}/metadata`),
           fetchJson<FurnitureItem[]>(`${modelApiBase}/furniture`),
-          fetchJson<HistoryEntry[]>(`${modelApiBase}/history`),
-          readViewerState(modelApiBase)
+          fetchJson<HistoryEntry[]>(`${modelApiBase}/history`)
         ])
         if (requestTokenRef.current !== token) return
 
         setMetadata(Array.isArray(loadedMetadata) ? loadedMetadata : [])
         setFurniture(Array.isArray(loadedFurniture) ? loadedFurniture : [])
         setHistory(Array.isArray(loadedHistory) ? loadedHistory : [])
-        setViewerState(loadedViewerState)
+        setViewerState(options?.initialViewerState ?? null)
         setStatusMessage(null)
         setIsHydrated(true)
       } catch (err) {

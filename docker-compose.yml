@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: ifcOps/Dockerfile
+    ports:
+      - "8090:8090"
     environment:
       - IFC_OPS_DATA_ROOT=/data
     volumes:

@@ -13,12 +13,6 @@ const hasViewerStatePayload = (viewerState: ViewerState | null | undefined): vie
   )
 }
 
-// Loads one saved viewer session snapshot for the active model and normalizes empty payloads to null.
-export const readViewerState = async (modelApiBase: string): Promise<ViewerState | null> => {
-  const viewerState = await fetchJson<ViewerState | null>(`${modelApiBase}/viewer-state`)
-  return hasViewerStatePayload(viewerState) ? viewerState : null
-}
-
 // Saves one viewer session snapshot for the active model and normalizes the echoed payload.
 export const writeViewerState = async (
   modelApiBase: string,
